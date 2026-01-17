@@ -1,0 +1,36 @@
+{
+  "expo": {
+    "name": "オオサンショウウオの川",
+    "slug": "oosan-river",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/baby_oosan.png",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "image": "./assets/baby_oosan.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#4a90a4"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "web": {
+      "bundler": "metro",
+      "output": "single"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.oosanriver.app"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/baby_oosan.png",
+        "backgroundColor": "#4a90a4"
+      },
+      "package": "com.oosanriver.app"
+    },
+    "plugins": [
+      "expo-asset"
+    ]
+  }
+}

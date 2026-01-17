@@ -1,0 +1,331 @@
+.app {
+  width: 100vw;
+  height: 100vh;
+  position: relative;
+  overflow: hidden;
+  cursor: pointer;
+}
+
+/* 川の背景（グラデーション） */
+.river-background {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(
+    to bottom,
+    #4a90a4 0%,
+    #5ba3b8 30%,
+    #6bb5cc 50%,
+    #5ba3b8 70%,
+    #4a90a4 100%
+  );
+  animation: flow 20s ease-in-out infinite;
+}
+
+@keyframes flow {
+  0%, 100% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+}
+
+/* 岩 */
+.rock {
+  position: absolute;
+  background: #6b5b4f;
+  border-radius: 50% 50% 50% 50% / 60% 60% 40% 40%;
+  opacity: 0.7;
+}
+
+.rock-1 {
+  width: 120px;
+  height: 80px;
+  bottom: 20%;
+  left: 10%;
+  transform: rotate(-15deg);
+}
+
+.rock-2 {
+  width: 90px;
+  height: 60px;
+  bottom: 15%;
+  right: 20%;
+  transform: rotate(20deg);
+}
+
+.rock-3 {
+  width: 70px;
+  height: 50px;
+  bottom: 25%;
+  left: 60%;
+  transform: rotate(-10deg);
+}
+
+/* 水草 */
+.weed {
+  position: absolute;
+  bottom: 0;
+  background: #2d5a3d;
+  border-radius: 2px;
+  opacity: 0.6;
+}
+
+.weed-1 {
+  width: 8px;
+  height: 150px;
+  left: 25%;
+  animation: sway 3s ease-in-out infinite;
+  animation-delay: 0s;
+}
+
+.weed-2 {
+  width: 6px;
+  height: 120px;
+  left: 50%;
+  animation: sway 3.5s ease-in-out infinite;
+  animation-delay: 1s;
+}
+
+.weed-3 {
+  width: 7px;
+  height: 100px;
+  right: 30%;
+  animation: sway 4s ease-in-out infinite;
+  animation-delay: 2s;
+}
+
+@keyframes sway {
+  0%, 100% {
+    transform: translateX(0) rotate(0deg);
+  }
+  25% {
+    transform: translateX(-5px) rotate(-2deg);
+  }
+  75% {
+    transform: translateX(5px) rotate(2deg);
+  }
+}
+
+/* オオサンショウウオ */
+.oosan {
+  position: absolute;
+  bottom: 30%;
+  left: 50%;
+  transform: translateX(-50%);
+  transition: transform 0.3s ease, opacity 0.5s ease;
+  pointer-events: none;
+  filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.2));
+  image-rendering: -webkit-optimize-contrast;
+  image-rendering: crisp-edges;
+}
+
+.oosan.petting {
+  transform: translateX(-50%) scale(1.05) translateY(-5px);
+}
+
+/* 体 - クリーム色のベース */
+.oosan-body {
+  position: absolute;
+  width: 100%;
+  height: 65%;
+  bottom: 0;
+  left: 0;
+  background: #F5E6D3;
+  border-radius: 50% 50% 50% 50% / 55% 55% 45% 45%;
+  border: 3px solid #2a2a2a;
+  box-shadow: 
+    inset 0 2px 4px rgba(255, 255, 255, 0.3),
+    0 2px 8px rgba(0, 0, 0, 0.15);
+}
+
+/* 体の茶色の斑点（複数） */
+.oosan-body::before {
+  content: '';
+  position: absolute;
+  width: 18%;
+  height: 22%;
+  top: 15%;
+  left: 25%;
+  background: #8B6F47;
+  border-radius: 40% 60% 50% 50% / 50% 50% 60% 40%;
+  border: 2px solid #2a2a2a;
+}
+
+.oosan-body::after {
+  content: '';
+  position: absolute;
+  width: 15%;
+  height: 18%;
+  top: 45%;
+  right: 20%;
+  background: #8B6F47;
+  border-radius: 50% 40% 60% 50% / 60% 50% 50% 40%;
+  border: 2px solid #2a2a2a;
+}
+
+/* 頭 - 丸みを帯びた形状 */
+.oosan-head {
+  position: absolute;
+  width: 40%;
+  height: 45%;
+  top: -5%;
+  left: 8%;
+  background: #F5E6D3;
+  border-radius: 50%;
+  border: 3px solid #2a2a2a;
+  box-shadow: 
+    inset 0 2px 4px rgba(255, 255, 255, 0.3),
+    0 1px 4px rgba(0, 0, 0, 0.15);
+  z-index: 2;
+}
+
+/* 頭の茶色の斑点 */
+.oosan-head::before {
+  content: '';
+  position: absolute;
+  width: 20%;
+  height: 25%;
+  top: 20%;
+  right: 15%;
+  background: #8B6F47;
+  border-radius: 50%;
+  border: 2px solid #2a2a2a;
+}
+
+/* 目 - 小さな黒い点 */
+.oosan-eyes {
+  position: absolute;
+  top: 35%;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 100%;
+  height: 20%;
+  z-index: 3;
+}
+
+.oosan-eye {
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  background: #1a1a1a;
+  border-radius: 50%;
+  top: 0;
+}
+
+.oosan-eye.left {
+  left: 30%;
+}
+
+.oosan-eye.right {
+  right: 30%;
+}
+
+/* 頬のピンク色のチーク */
+.oosan-cheek {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  background: #FFB6C1;
+  border-radius: 50%;
+  top: 50%;
+  opacity: 0.6;
+}
+
+.oosan-cheek.left {
+  left: 20%;
+}
+
+.oosan-cheek.right {
+  right: 20%;
+}
+
+/* 鼻 - 小さな点 */
+.oosan-nose {
+  position: absolute;
+  width: 4px;
+  height: 4px;
+  top: 45%;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #1a1a1a;
+  border-radius: 50%;
+  z-index: 3;
+}
+
+/* 口 - 小さな「へ」の字 */
+.oosan-mouth {
+  position: absolute;
+  width: 16px;
+  height: 8px;
+  bottom: 20%;
+  left: 50%;
+  transform: translateX(-50%);
+  border: 2px solid #2a2a2a;
+  border-top: none;
+  border-radius: 0 0 50% 50%;
+  background: transparent;
+  z-index: 3;
+}
+
+
+/* 尾 - 平たくパドル状 */
+.oosan-tail {
+  position: absolute;
+  width: 20%;
+  height: 45%;
+  bottom: 15%;
+  right: -3%;
+  background: #F5E6D3;
+  border-radius: 0 50% 50% 0;
+  transform: rotate(-8deg);
+  border: 3px solid #2a2a2a;
+  box-shadow: 
+    inset 0 2px 4px rgba(255, 255, 255, 0.3),
+    0 1px 4px rgba(0, 0, 0, 0.15);
+  z-index: 1;
+}
+
+/* 尾の茶色の斑点 */
+.oosan-tail::before {
+  content: '';
+  position: absolute;
+  width: 30%;
+  height: 35%;
+  top: 30%;
+  left: 20%;
+  background: #8B6F47;
+  border-radius: 50%;
+  border: 2px solid #2a2a2a;
+}
+
+/* 日次ログ */
+.daily-log {
+  position: absolute;
+  bottom: 40px;
+  left: 50%;
+  transform: translateX(-50%);
+  color: rgba(255, 255, 255, 0.8);
+  font-size: 16px;
+  text-align: center;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+  padding: 10px 20px;
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 20px;
+  backdrop-filter: blur(5px);
+  animation: fadeIn 1s ease-in;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+}
