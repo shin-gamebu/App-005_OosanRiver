@@ -6,9 +6,42 @@ export interface AppState {
   lastVisitDate: string;
   lastGrowthDate: string;
   sizeFactor: number;
+  /** 体長カウントの起点（経過秒 × GROWTH_CM_PER_SECOND で増加、上限 TARGET_CM） */
+  growthAnchorMs: number;
   condition: Condition;
   latestLog: string;
 }
+
+/** 目標体長（cm）。表示・画像スケールの上限の目安 */
+export const GROWTH_TARGET_CM = 100;
+
+/** 1 秒あたりの体長増分（cm）。固定値 */
+export const GROWTH_CM_PER_SECOND = 0.00001;
+
+/** 体長表示の桁数（0.00001 cm 単位＝小数第5位まで） */
+export const GROWTH_CM_DISPLAY_DECIMALS = 5;
+
+export const getOosanLengthCm = (growthAnchorMs: number, nowMs: number = Date.now()): number => {
+  const elapsedMs = nowMs - growthAnchorMs;
+  if (elapsedMs <= 0) return 0;
+  const cm = (elapsedMs / 1000) * GROWTH_CM_PER_SECOND;
+  return Math.min(GROWTH_TARGET_CM, cm);
+};
+
+/** 画像スケール用 0〜1（体長が TARGET_CM に達すると 1） */
+export const getOosanGrowthProgress = (
+  growthAnchorMs: number,
+  nowMs: number = Date.now()
+): number => {
+  return getOosanLengthCm(growthAnchorMs, nowMs) / GROWTH_TARGET_CM;
+};
+
+/** 表示は GROWTH_CM_PER_SECOND（0.00001cm）の倍数に丸めてから表示 */
+export const formatOosanLengthCm = (cm: number): string => {
+  const units = Math.round(cm / GROWTH_CM_PER_SECOND);
+  const snapped = units * GROWTH_CM_PER_SECOND;
+  return snapped.toFixed(GROWTH_CM_DISPLAY_DECIMALS);
+};
 
 // 初期状態を生成
 export const createInitialState = (): AppState => {
@@ -18,6 +51,7 @@ export const createInitialState = (): AppState => {
     lastVisitDate: today,
     lastGrowthDate: today,
     sizeFactor: 1.0,
+    growthAnchorMs: Date.now(),
     condition: 'healthy',
     latestLog: '川の底で静かに過ごしています。',
   };

@@ -4,19 +4,54 @@ import {
   processGrowth,
   processCondition,
   generateDailyLog,
+  getOosanGrowthProgress,
+  getOosanLengthCm,
+  formatOosanLengthCm,
+  GROWTH_CM_PER_SECOND,
+  GROWTH_TARGET_CM,
   AppState,
 } from './logic';
 
 describe('ロジック関数のテスト', () => {
+  describe('getOosanLengthCm / getOosanGrowthProgress', () => {
+    test('固定レート 0.00001 cm/s、上限 TARGET_CM', () => {
+      const t0 = 1_000_000_000_000;
+      expect(getOosanLengthCm(t0, t0)).toBe(0);
+      expect(getOosanGrowthProgress(t0, t0)).toBe(0);
+      expect(getOosanLengthCm(t0, t0 + 1000)).toBeCloseTo(GROWTH_CM_PER_SECOND, 12);
+      const secToFull = GROWTH_TARGET_CM / GROWTH_CM_PER_SECOND;
+      const halfMs = (secToFull / 2) * 1000;
+      expect(getOosanLengthCm(t0, t0 + halfMs)).toBeCloseTo(GROWTH_TARGET_CM / 2, 5);
+      expect(getOosanGrowthProgress(t0, t0 + halfMs)).toBeCloseTo(0.5, 5);
+      const fullMs = secToFull * 1000;
+      expect(getOosanLengthCm(t0, t0 + fullMs)).toBe(GROWTH_TARGET_CM);
+      expect(getOosanGrowthProgress(t0, t0 + fullMs)).toBe(1);
+      expect(getOosanLengthCm(t0, t0 + fullMs + 86400000)).toBe(GROWTH_TARGET_CM);
+      expect(getOosanGrowthProgress(t0, t0 + fullMs + 86400000)).toBe(1);
+    });
+  });
+
+  describe('formatOosanLengthCm', () => {
+    test('0.00001cm 単位に丸めて小数第5位まで', () => {
+      expect(formatOosanLengthCm(0)).toBe('0.00000');
+      expect(formatOosanLengthCm(0.000012)).toBe('0.00001');
+      expect(formatOosanLengthCm(12.345678901234)).toBe('12.34568');
+    });
+  });
+
   describe('createInitialState', () => {
     test('初期状態が正しく生成される', () => {
+      const before = Date.now();
       const state = createInitialState();
+      const after = Date.now();
       const today = new Date().toISOString().split('T')[0];
       
       expect(state.startDate).toBe(today);
       expect(state.lastVisitDate).toBe(today);
       expect(state.lastGrowthDate).toBe(today);
       expect(state.sizeFactor).toBe(1.0);
+      expect(state.growthAnchorMs).toBeGreaterThanOrEqual(before);
+      expect(state.growthAnchorMs).toBeLessThanOrEqual(after);
       expect(state.condition).toBe('healthy');
       expect(state.latestLog).toBe('川の底で静かに過ごしています。');
     });
@@ -41,6 +76,7 @@ describe('ロジック関数のテスト', () => {
         lastVisitDate: today,
         lastGrowthDate: yesterday,
         sizeFactor: 1.0,
+        growthAnchorMs: 0,
         condition: 'healthy',
         latestLog: 'テスト',
       };
@@ -60,6 +96,7 @@ describe('ロジック関数のテスト', () => {
         lastVisitDate: today,
         lastGrowthDate: today,
         sizeFactor: 1.5,
+        growthAnchorMs: 0,
         condition: 'healthy',
         latestLog: 'テスト',
       };
@@ -79,6 +116,7 @@ describe('ロジック関数のテスト', () => {
         lastVisitDate: today,
         lastGrowthDate: yesterday,
         sizeFactor: 1.0,
+        growthAnchorMs: 0,
         condition: 'weak',
         latestLog: 'テスト',
       };
@@ -98,6 +136,7 @@ describe('ロジック関数のテスト', () => {
         lastVisitDate: today,
         lastGrowthDate: yesterday,
         sizeFactor: 1.0,
+        growthAnchorMs: 0,
         condition: 'dead',
         latestLog: 'テスト',
       };
@@ -119,6 +158,7 @@ describe('ロジック関数のテスト', () => {
         lastVisitDate: twoDaysAgo,
         lastGrowthDate: twoDaysAgo,
         sizeFactor: 1.0,
+        growthAnchorMs: 0,
         condition: 'healthy',
         latestLog: 'テスト',
       };
@@ -138,6 +178,7 @@ describe('ロジック関数のテスト', () => {
         lastVisitDate: threeDaysAgo,
         lastGrowthDate: threeDaysAgo,
         sizeFactor: 1.0,
+        growthAnchorMs: 0,
         condition: 'healthy',
         latestLog: 'テスト',
       };
@@ -157,6 +198,7 @@ describe('ロジック関数のテスト', () => {
         lastVisitDate: sevenDaysAgo,
         lastGrowthDate: sevenDaysAgo,
         sizeFactor: 1.0,
+        growthAnchorMs: 0,
         condition: 'healthy',
         latestLog: 'テスト',
       };
@@ -176,6 +218,7 @@ describe('ロジック関数のテスト', () => {
         lastVisitDate: yesterday,
         lastGrowthDate: yesterday,
         sizeFactor: 1.0,
+        growthAnchorMs: 0,
         condition: 'weak',
         latestLog: 'テスト',
       };
@@ -194,6 +237,7 @@ describe('ロジック関数のテスト', () => {
         lastVisitDate: '2024-01-10',
         lastGrowthDate: '2024-01-01',
         sizeFactor: 1.0,
+        growthAnchorMs: 0,
         condition: 'dead',
         latestLog: 'テスト',
       };
@@ -208,6 +252,7 @@ describe('ロジック関数のテスト', () => {
         lastVisitDate: '2024-01-05',
         lastGrowthDate: '2024-01-01',
         sizeFactor: 1.0,
+        growthAnchorMs: 0,
         condition: 'weak',
         latestLog: 'テスト',
       };
@@ -228,6 +273,7 @@ describe('ロジック関数のテスト', () => {
         lastVisitDate: today,
         lastGrowthDate: today,
         sizeFactor: 1.0,
+        growthAnchorMs: 0,
         condition: 'healthy',
         latestLog: 'テスト',
       };
@@ -242,6 +288,7 @@ describe('ロジック関数のテスト', () => {
         lastVisitDate: '2024-01-05',
         lastGrowthDate: '2024-01-01',
         sizeFactor: 1.0,
+        growthAnchorMs: 0,
         condition: 'healthy',
         latestLog: 'テスト',
       };

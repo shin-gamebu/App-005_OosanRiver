@@ -4,10 +4,10 @@
     "slug": "oosan-river",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/baby_oosan.png",
+    "icon": "./assets/images/baby_oosan.png",
     "userInterfaceStyle": "light",
     "splash": {
-      "image": "./assets/baby_oosan.png",
+      "image": "./assets/images/baby_oosan.png",
       "resizeMode": "contain",
       "backgroundColor": "#4a90a4"
     },
@@ -24,7 +24,7 @@
     },
     "android": {
       "adaptiveIcon": {
-        "foregroundImage": "./assets/baby_oosan.png",
+        "foregroundImage": "./assets/images/baby_oosan.png",
         "backgroundColor": "#4a90a4"
       },
       "package": "com.oosanriver.app"

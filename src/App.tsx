@@ -21,7 +21,11 @@ export const loadState = async (): Promise<AppState> => {
   try {
     const stored = await AsyncStorage.getItem(STORAGE_KEY);
     if (stored) {
-      return JSON.parse(stored);
+      const parsed = JSON.parse(stored) as AppState;
+      if (typeof parsed.growthAnchorMs !== 'number' || !Number.isFinite(parsed.growthAnchorMs)) {
+        return { ...parsed, growthAnchorMs: Date.now() };
+      }
+      return parsed;
     }
   } catch (error) {
     console.error('Failed to load state:', error);
@@ -144,7 +148,7 @@ const App: React.FC = () => {
           ]}
         >
           <Image
-            source={require('../assets/baby_oosan.png')}
+            source={require('../assets/images/baby_oosan.png')}
             style={[styles.oosan, { width: size, height: size * 0.8 }]}
             resizeMode="contain"
           />
