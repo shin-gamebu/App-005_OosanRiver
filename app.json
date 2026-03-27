@@ -1,10 +1,10 @@
 {
   "expo": {
-    "name": "オオサンショウウオの川",
+    "name": "オオサンショウウオ育成",
     "slug": "oosan-river",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/images/baby_oosan.png",
+    "icon": "./assets/images/baby_oosan_square.png",
     "userInterfaceStyle": "light",
     "splash": {
       "image": "./assets/images/baby_oosan.png",
@@ -20,17 +20,34 @@
     },
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.oosanriver.app"
+      "bundleIdentifier": "com.oosanriver.app",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
     },
     "android": {
       "adaptiveIcon": {
-        "foregroundImage": "./assets/images/baby_oosan.png",
+        "foregroundImage": "./assets/images/baby_oosan_square.png",
         "backgroundColor": "#4a90a4"
       },
       "package": "com.oosanriver.app"
     },
     "plugins": [
-      "expo-asset"
-    ]
+      "expo-asset",
+      [
+        "expo-notifications",
+        {
+          "sounds": [],
+          "enableBackgroundRemoteNotifications": false
+        }
+      ],
+      "expo-font",
+      "expo-video"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "d88ee4be-8dfd-4820-b789-a4a353504878"
+      }
+    }
   }
 }

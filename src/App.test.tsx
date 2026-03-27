@@ -2,6 +2,31 @@ import React from 'react';
 import { render, fireEvent, waitFor } from '@testing-library/react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import App from './App';
+
+jest.mock('expo-image', () => ({
+  Image: 'ExpoImage',
+}));
+jest.mock('@expo/vector-icons', () => ({
+  Ionicons: 'Ionicons',
+}));
+jest.mock('expo-asset', () => ({
+  Asset: { loadAsync: jest.fn().mockResolvedValue(undefined) },
+}));
+jest.mock('canvas-confetti', () => jest.fn());
+jest.mock('expo-notifications', () => {
+  const SchedulableTriggerInputTypes = { TIME_INTERVAL: 'timeInterval' };
+  return {
+    SchedulableTriggerInputTypes,
+    setNotificationHandler: jest.fn(),
+    getPermissionsAsync: jest.fn(async () => ({ status: 'granted' })),
+    requestPermissionsAsync: jest.fn(async () => ({ status: 'granted' })),
+    scheduleNotificationAsync: jest.fn(async () => 'mock-notif-id'),
+    cancelScheduledNotificationAsync: jest.fn(async () => {}),
+    setNotificationChannelAsync: jest.fn(async () => {}),
+    AndroidImportance: { HIGH: 6, DEFAULT: 5 },
+  };
+});
+import { healthyMessages } from './healthyMessages';
 import {
   createInitialState,
   loadState,
@@ -12,6 +37,8 @@ import {
   generateDailyLog,
   AppState,
 } from './App';
+
+const daytimeHealthyAt = new Date('2024-01-05T14:00:00');
 
 // AsyncStorage のモック
 jest.mock('@react-native-async-storage/async-storage', () => ({
@@ -46,8 +73,14 @@ describe('App コンポーネント', () => {
       lastGrowthDate: '2024-01-01',
       sizeFactor: 1.0,
       growthAnchorMs: 0,
+      bodyLengthCm: 0,
+      fullness: 92,
+      viscosity: 92,
       condition: 'dead',
       latestLog: '静かな川の流れだけが残っています。',
+      claimedMilestoneIds: [],
+      sessionForegroundMs: 0,
+      lastGrowthTickMs: 1_700_000_000_000,
     };
     
     mockAsyncStorage.getItem.mockResolvedValue(JSON.stringify(deadState));
@@ -80,8 +113,13 @@ describe('ロジック関数のテスト', () => {
       expect(state.sizeFactor).toBe(1.0);
       expect(state.growthAnchorMs).toBeGreaterThanOrEqual(before);
       expect(state.growthAnchorMs).toBeLessThanOrEqual(after);
+      expect(state.bodyLengthCm).toBe(0);
+      expect(state.fullness).toBe(92);
+      expect(state.viscosity).toBe(92);
       expect(state.condition).toBe('healthy');
       expect(state.latestLog).toBe('川の底で静かに過ごしています。');
+      expect(state.claimedMilestoneIds).toEqual([]);
+      expect(state.sessionForegroundMs).toBe(0);
     });
   });
 
@@ -93,8 +131,14 @@ describe('ロジック関数のテスト', () => {
         lastGrowthDate: '2024-01-02',
         sizeFactor: 1.5,
         growthAnchorMs: 0,
+        bodyLengthCm: 0,
+        fullness: 92,
+        viscosity: 92,
         condition: 'healthy',
         latestLog: 'テストログ',
+        claimedMilestoneIds: [],
+        sessionForegroundMs: 0,
+        lastGrowthTickMs: 1_700_000_000_000,
       };
       
       await saveState(state);
@@ -137,6 +181,12 @@ describe('ロジック関数のテスト', () => {
         lastGrowthDate: yesterday,
         sizeFactor: 1.0,
         growthAnchorMs: 0,
+        bodyLengthCm: 0,
+        fullness: 92,
+        viscosity: 92,
+        claimedMilestoneIds: [],
+        sessionForegroundMs: 0,
+        lastGrowthTickMs: 1_700_000_000_000,
         condition: 'healthy',
         latestLog: 'テスト',
       };
@@ -157,6 +207,12 @@ describe('ロジック関数のテスト', () => {
         lastGrowthDate: today,
         sizeFactor: 1.5,
         growthAnchorMs: 0,
+        bodyLengthCm: 0,
+        fullness: 92,
+        viscosity: 92,
+        claimedMilestoneIds: [],
+        sessionForegroundMs: 0,
+        lastGrowthTickMs: 1_700_000_000_000,
         condition: 'healthy',
         latestLog: 'テスト',
       };
@@ -177,6 +233,12 @@ describe('ロジック関数のテスト', () => {
         lastGrowthDate: yesterday,
         sizeFactor: 1.0,
         growthAnchorMs: 0,
+        bodyLengthCm: 0,
+        fullness: 92,
+        viscosity: 92,
+        claimedMilestoneIds: [],
+        sessionForegroundMs: 0,
+        lastGrowthTickMs: 1_700_000_000_000,
         condition: 'weak',
         latestLog: 'テスト',
       };
@@ -197,6 +259,12 @@ describe('ロジック関数のテスト', () => {
         lastGrowthDate: yesterday,
         sizeFactor: 1.0,
         growthAnchorMs: 0,
+        bodyLengthCm: 0,
+        fullness: 92,
+        viscosity: 92,
+        claimedMilestoneIds: [],
+        sessionForegroundMs: 0,
+        lastGrowthTickMs: 1_700_000_000_000,
         condition: 'dead',
         latestLog: 'テスト',
       };
@@ -219,6 +287,12 @@ describe('ロジック関数のテスト', () => {
         lastGrowthDate: twoDaysAgo,
         sizeFactor: 1.0,
         growthAnchorMs: 0,
+        bodyLengthCm: 0,
+        fullness: 92,
+        viscosity: 92,
+        claimedMilestoneIds: [],
+        sessionForegroundMs: 0,
+        lastGrowthTickMs: 1_700_000_000_000,
         condition: 'healthy',
         latestLog: 'テスト',
       };
@@ -239,6 +313,12 @@ describe('ロジック関数のテスト', () => {
         lastGrowthDate: threeDaysAgo,
         sizeFactor: 1.0,
         growthAnchorMs: 0,
+        bodyLengthCm: 0,
+        fullness: 92,
+        viscosity: 92,
+        claimedMilestoneIds: [],
+        sessionForegroundMs: 0,
+        lastGrowthTickMs: 1_700_000_000_000,
         condition: 'healthy',
         latestLog: 'テスト',
       };
@@ -259,6 +339,12 @@ describe('ロジック関数のテスト', () => {
         lastGrowthDate: sevenDaysAgo,
         sizeFactor: 1.0,
         growthAnchorMs: 0,
+        bodyLengthCm: 0,
+        fullness: 92,
+        viscosity: 92,
+        claimedMilestoneIds: [],
+        sessionForegroundMs: 0,
+        lastGrowthTickMs: 1_700_000_000_000,
         condition: 'healthy',
         latestLog: 'テスト',
       };
@@ -279,6 +365,12 @@ describe('ロジック関数のテスト', () => {
         lastGrowthDate: yesterday,
         sizeFactor: 1.0,
         growthAnchorMs: 0,
+        bodyLengthCm: 0,
+        fullness: 92,
+        viscosity: 92,
+        claimedMilestoneIds: [],
+        sessionForegroundMs: 0,
+        lastGrowthTickMs: 1_700_000_000_000,
         condition: 'weak',
         latestLog: 'テスト',
       };
@@ -298,6 +390,12 @@ describe('ロジック関数のテスト', () => {
         lastGrowthDate: '2024-01-01',
         sizeFactor: 1.0,
         growthAnchorMs: 0,
+        bodyLengthCm: 0,
+        fullness: 92,
+        viscosity: 92,
+        claimedMilestoneIds: [],
+        sessionForegroundMs: 0,
+        lastGrowthTickMs: 1_700_000_000_000,
         condition: 'dead',
         latestLog: 'テスト',
       };
@@ -313,6 +411,12 @@ describe('ロジック関数のテスト', () => {
         lastGrowthDate: '2024-01-01',
         sizeFactor: 1.0,
         growthAnchorMs: 0,
+        bodyLengthCm: 0,
+        fullness: 92,
+        viscosity: 92,
+        claimedMilestoneIds: [],
+        sessionForegroundMs: 0,
+        lastGrowthTickMs: 1_700_000_000_000,
         condition: 'weak',
         latestLog: 'テスト',
       };
@@ -334,6 +438,12 @@ describe('ロジック関数のテスト', () => {
         lastGrowthDate: today,
         sizeFactor: 1.0,
         growthAnchorMs: 0,
+        bodyLengthCm: 0,
+        fullness: 92,
+        viscosity: 92,
+        claimedMilestoneIds: [],
+        sessionForegroundMs: 0,
+        lastGrowthTickMs: 1_700_000_000_000,
         condition: 'healthy',
         latestLog: 'テスト',
       };
@@ -349,18 +459,17 @@ describe('ロジック関数のテスト', () => {
         lastGrowthDate: '2024-01-01',
         sizeFactor: 1.0,
         growthAnchorMs: 0,
+        bodyLengthCm: 0,
+        fullness: 92,
+        viscosity: 92,
+        claimedMilestoneIds: [],
+        sessionForegroundMs: 0,
+        lastGrowthTickMs: 1_700_000_000_000,
         condition: 'healthy',
         latestLog: 'テスト',
       };
-      
-      const log = generateDailyLog(state);
-      const healthyMessages = [
-        '今日も静かに過ごしています。',
-        'ゆっくりと成長しています。',
-        '川の流れに身を任せています。',
-        '岩の陰で休んでいます。',
-        '水草の間を泳いでいます。',
-      ];
+
+      const log = generateDailyLog(state, daytimeHealthyAt);
       expect(healthyMessages).toContain(log);
     });
   });
