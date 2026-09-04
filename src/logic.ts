@@ -7,6 +7,11 @@ import {
 // 状態の型定義
 export type Condition = 'healthy' | 'weak' | 'dead';
 
+/** 最後の訪問からこの日数で、再訪を促す通知と弱り状態にする。 */
+export const DAYS_UNTIL_INACTIVITY_REMINDER = 14;
+/** 最後の訪問からこの日数で、死亡状態にする。 */
+export const DAYS_UNTIL_DEATH = 30;
+
 export interface AppState {
   startDate: string;
   lastVisitDate: string;
@@ -110,8 +115,11 @@ export const computeGrowthMultiplier = (
 
 export const formatGrowthMultiplier = (m: number): string => `x${m.toFixed(2)}`;
 
+/** この体長から、赤ちゃんの姿ではなく成体の姿を表示する。 */
+export const ADULT_OOSAN_MIN_LENGTH_CM = 20;
+
 export const getGrowthPhaseLabel = (bodyLengthCm: number): string =>
-  bodyLengthCm < 20 ? '幼生期（外鰓あり）' : '成体（ヌシへの道）';
+  bodyLengthCm < ADULT_OOSAN_MIN_LENGTH_CM ? '幼生期（外鰓あり）' : '成体（ヌシへの道）';
 
 /** 満腹度バー色（緑→黄→赤） */
 export const fullnessBarColor = (fullness: number): string => {
@@ -265,9 +273,9 @@ export const processCondition = (state: AppState): AppState => {
 
   let newCondition: Condition = state.condition;
 
-  if (daysSinceVisit >= 7) {
+  if (daysSinceVisit >= DAYS_UNTIL_DEATH) {
     newCondition = 'dead';
-  } else if (daysSinceVisit >= 3) {
+  } else if (daysSinceVisit >= DAYS_UNTIL_INACTIVITY_REMINDER) {
     newCondition = 'weak';
   } else {
     newCondition = 'healthy';

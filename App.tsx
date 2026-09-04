@@ -10,6 +10,7 @@ import {
   Platform,
   ScrollView,
   Easing,
+  Alert,
   AppState as RNAppState,
   Modal,
   Pressable,
@@ -22,11 +23,13 @@ import { Ionicons } from '@expo/vector-icons';
 import {
   AppState,
   createInitialState,
+  getDaysDiff,
   processGrowth,
   processCondition,
   generateDailyLog,
   formatOosanLengthCm,
   GROWTH_TARGET_CM,
+  ADULT_OOSAN_MIN_LENGTH_CM,
   GROWTH_CM_PER_SECOND,
   MS_TO_REACH_TARGET_LENGTH,
   migrateAppState,
@@ -40,10 +43,12 @@ import {
   fullnessBarColor,
   backgroundGaugeDecayMultiplier,
   DEFAULT_NIGHT_CARE_MULTIPLIER,
+  DAYS_UNTIL_INACTIVITY_REMINDER,
 } from './src/logic';
 import { DebugTimeProvider, useDebugTime } from './src/DebugTimeContext';
 import { DebugOverlay } from './src/DebugOverlay';
 import { LegalInfoModal } from './src/LegalInfoModal';
+import { ADULT_WALK_FRAMES } from './src/adultWalkFrames';
 import {
   applyOfflineCatchUp,
   findBackloggedMilestones,
@@ -60,6 +65,8 @@ import {
   clearPredictiveGaugeAlerts,
   notifyFullnessEmptyNow,
   notifyViscosityEmptyNow,
+  notifyInactivityReminderNow,
+  notifyThirtyDayReminderNow,
 } from './src/careGaugeNotifications';
 
 /**
@@ -259,6 +266,56 @@ const FallingImageParticle: React.FC<{ p: FallingPfx; fallDistance: number }> = 
   );
 };
 
+/** なでられた喜びを表す、短いハートの浮遊演出。 */
+const FloatingPetHeart: React.FC<{
+  delay: number;
+  horizontalOffset: number;
+  size: number;
+}> = ({ delay, horizontalOffset, size }) => {
+  const progress = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    const animation = Animated.sequence([
+      Animated.delay(delay),
+      Animated.timing(progress, {
+        toValue: 1,
+        duration: 720,
+        easing: Easing.out(Easing.cubic),
+        useNativeDriver: true,
+      }),
+    ]);
+    animation.start();
+    return () => animation.stop();
+  }, [delay, progress]);
+
+  const travel = Math.max(42, size * 0.32);
+  return (
+    <Animated.Text
+      style={[
+        styles.petHeart,
+        {
+          left: size * 0.5 + horizontalOffset,
+          opacity: progress.interpolate({ inputRange: [0, 0.1, 0.75, 1], outputRange: [0, 1, 1, 0] }),
+          transform: [
+            { translateY: progress.interpolate({ inputRange: [0, 1], outputRange: [0, -travel] }) },
+            { scale: progress.interpolate({ inputRange: [0, 0.2, 1], outputRange: [0.55, 1.1, 0.9] }) },
+          ],
+        },
+      ]}
+    >
+      ♥
+    </Animated.Text>
+  );
+};
+
+const PetHeartBurst: React.FC<{ size: number }> = ({ size }) => (
+  <View pointerEvents="none" style={[styles.petHeartLayer, { width: size, height: size * 0.8, marginLeft: -size / 2 }]}>
+    <FloatingPetHeart delay={0} horizontalOffset={-size * 0.18} size={size} />
+    <FloatingPetHeart delay={90} horizontalOffset={0} size={size} />
+    <FloatingPetHeart delay={170} horizontalOffset={size * 0.18} size={size} />
+  </View>
+);
+
 async function runConfettiBurst(): Promise<void> {
   if (Platform.OS !== 'web') return;
   try {
@@ -408,6 +465,10 @@ const AppMain: React.FC = () => {
   const [isPetting, setIsPetting] = useState(false);
   const [imagesLoaded, setImagesLoaded] = useState(Platform.OS === 'web');
   const [isMovingRight, setIsMovingRight] = useState(false); // オオサンショウウオが右に動いているかどうか
+  const [isOosanWalking, setIsOosanWalking] = useState(false);
+  const [adultWalkFrameIndex, setAdultWalkFrameIndex] = useState(0);
+  const isAdultForAnimation =
+    state?.condition !== 'dead' && (state?.bodyLengthCm ?? 0) >= ADULT_OOSAN_MIN_LENGTH_CM;
   const scaleAnim = React.useRef(new Animated.Value(1)).current;
   // オオサンショウウオの位置アニメーション（X座標とY座標）
   const oosanXAnim = React.useRef(new Animated.Value(0)).current;
@@ -443,6 +504,32 @@ const AppMain: React.FC = () => {
   const [legalInfoOpen, setLegalInfoOpen] = useState(false);
   const removeTapRipple = useCallback((id: number) => {
     setTapRipples((list) => list.filter((t) => t.id !== id));
+  }, []);
+
+  /** 死亡状態から、保存済みの育成データを初期状態へ戻して再開する。 */
+  const restartWithNewOosan = useCallback(() => {
+    Alert.alert(
+      '新しく始めますか？',
+      'これまでの体長・おなか・ヌメリ・成長の状態は初期化されます。',
+      [
+        { text: '今は閉じる', style: 'cancel' },
+        {
+          text: '始める',
+          onPress: () => {
+            const initialState = createInitialState();
+            setParticles([]);
+            setTapRipples([]);
+            setCelebrationQueue([]);
+            setCelebrationItem(null);
+            setOfflineBacklogPageQueue([]);
+            offlineBacklogModalMetaRef.current = null;
+            void clearPredictiveGaugeAlerts();
+            setState(initialState);
+            void saveState(initialState);
+          },
+        },
+      ]
+    );
   }, []);
 
   const commitClaimMilestone = useCallback(
@@ -509,6 +596,27 @@ const AppMain: React.FC = () => {
     []
   );
 
+  /** 開発用: 死亡画面と再スタート導線をすぐ確認できるようにする。 */
+  const applyDebugDeadState = useCallback(() => {
+    setParticles([]);
+    setTapRipples([]);
+    setCelebrationQueue([]);
+    setCelebrationItem(null);
+    setOfflineBacklogPageQueue([]);
+    offlineBacklogModalMetaRef.current = null;
+    void clearPredictiveGaugeAlerts();
+    setState((s) => {
+      if (!s || s.condition === 'dead') return s;
+      const n = {
+        ...s,
+        condition: 'dead' as const,
+        latestLog: '静かな川の流れだけが残っています。',
+      };
+      void saveState(n);
+      return n;
+    });
+  }, []);
+
   const spawnBurst = useCallback((kind: PfxKind) => {
     const count = 3;
     const batch: FallingPfx[] = [];
@@ -564,6 +672,7 @@ const AppMain: React.FC = () => {
           await Asset.loadAsync([
             require('./assets/images/kamogawa_tate2.png'),
             require('./assets/images/sansyo_toka2.gif'),
+            ...ADULT_WALK_FRAMES,
             require('./assets/images/esa.png'),
             require('./assets/images/mizu.png'),
           ]);
@@ -576,6 +685,16 @@ const AppMain: React.FC = () => {
     };
     loadAssets();
   }, []);
+
+  // 成体は移動中だけ動画由来のPNG連番をゆっくり進める。停止時は最後の姿勢を保つ。
+  useEffect(() => {
+    if (!isAdultForAnimation || !isOosanWalking) return;
+
+    const timer = setInterval(() => {
+      setAdultWalkFrameIndex((index) => (index + 1) % ADULT_WALK_FRAMES.length);
+    }, 170);
+    return () => clearInterval(timer);
+  }, [isAdultForAnimation, isOosanWalking]);
 
   // 初回マウント時に状態を読み込む
   useEffect(() => {
@@ -599,6 +718,8 @@ const AppMain: React.FC = () => {
         };
       }
       const now = Date.now();
+      const today = new Date().toISOString().split('T')[0];
+      const daysSinceLastVisit = getDaysDiff(loadedState.lastVisitDate, today);
       const fullnessBeforeOffline = loadedState.fullness;
       const viscosityBeforeOffline = loadedState.viscosity;
       let updatedState = loadedState;
@@ -622,14 +743,15 @@ const AppMain: React.FC = () => {
         setOfflineBacklogPageQueue(pages);
         skipNextMilestoneDiffRef.current = true;
       }
-      const today = new Date().toISOString().split('T')[0];
-      
       // 状態を更新
       updatedState = processCondition(updatedState);
       updatedState = processGrowth(updatedState);
       
       // 日次ログを生成
-      const newLog = generateDailyLog(updatedState);
+      const newLog =
+        updatedState.condition !== 'dead' && daysSinceLastVisit >= DAYS_UNTIL_INACTIVITY_REMINDER
+          ? 'しばらく会えていませんでした。会いにきてくれてありがとう。'
+          : generateDailyLog(updatedState);
       if (updatedState.lastVisitDate === today) {
         updatedState.latestLog = newLog;
       }
@@ -880,6 +1002,7 @@ const AppMain: React.FC = () => {
 
       const currentX = (oosanXAnim as any)._value || 0;
       setIsMovingRight(targetX > currentX);
+      setIsOosanWalking(true);
 
       Animated.parallel([
         Animated.timing(oosanXAnim, {
@@ -894,12 +1017,55 @@ const AppMain: React.FC = () => {
         }),
       ]).start(({ finished }) => {
         if (!finished) return;
+        setIsOosanWalking(false);
         if (wanderGenRef.current !== genAtStart) return;
-        Animated.delay(waitDuration).start(({ finished: waitDone }) => {
-          if (!waitDone) return;
+
+        const resumeWander = () => {
           if (wanderGenRef.current !== genAtStart) return;
           moveOosan();
-        });
+        };
+        // ときどき位置をほぼ変えずに、少しだけ足をばたつかせる。
+        if (Math.random() < 0.35) {
+          const beforeFidgetDelay = Math.max(350, waitDuration * 0.35);
+          Animated.delay(beforeFidgetDelay).start(({ finished: delayDone }) => {
+            if (!delayDone || wanderGenRef.current !== genAtStart) return;
+            const idleX = (oosanXAnim as any)._value || 0;
+            const idleY = (oosanYAnim as any)._value || 0;
+            const fidgetDistance = isSmall ? 14 : 26;
+            const fidgetX = Math.max(
+              minX,
+              Math.min(maxX, idleX + (Math.random() < 0.5 ? -fidgetDistance : fidgetDistance))
+            );
+            const fidgetY = Math.max(
+              minY,
+              Math.min(maxY, idleY + (Math.random() - 0.5) * fidgetDistance * 0.35)
+            );
+            setIsMovingRight(fidgetX > idleX);
+            setIsOosanWalking(true);
+            Animated.parallel([
+              Animated.sequence([
+                Animated.timing(oosanXAnim, { toValue: fidgetX, duration: 420, useNativeDriver }),
+                Animated.timing(oosanXAnim, { toValue: idleX, duration: 480, useNativeDriver }),
+              ]),
+              Animated.sequence([
+                Animated.timing(oosanYAnim, { toValue: fidgetY, duration: 420, useNativeDriver }),
+                Animated.timing(oosanYAnim, { toValue: idleY, duration: 480, useNativeDriver }),
+              ]),
+            ]).start(({ finished: fidgetDone }) => {
+              if (!fidgetDone || wanderGenRef.current !== genAtStart) return;
+              setIsOosanWalking(false);
+              Animated.delay(Math.max(0, waitDuration - beforeFidgetDelay)).start(({ finished: waitDone }) => {
+                if (!waitDone) return;
+                resumeWander();
+              });
+            });
+          });
+        } else {
+          Animated.delay(waitDuration).start(({ finished: waitDone }) => {
+            if (!waitDone) return;
+            resumeWander();
+          });
+        }
       });
     };
 
@@ -915,7 +1081,6 @@ const AppMain: React.FC = () => {
 
   const maybePetOnPress = useCallback(() => {
     if (!state || state.condition !== 'healthy') return;
-    if (Math.random() >= 0.1) return;
     setIsPetting(true);
     const useNativeDriver = Platform.OS !== 'web';
     Animated.sequence([
@@ -929,6 +1094,7 @@ const AppMain: React.FC = () => {
         duration: 300,
         useNativeDriver,
       }),
+      Animated.delay(450),
     ]).start(() => {
       setIsPetting(false);
     });
@@ -957,6 +1123,7 @@ const AppMain: React.FC = () => {
         const targetX = minX + tapNormX * (maxX - minX);
         const targetY = minY + tapNormY * (maxY - minY);
         setIsMovingRight(targetX > currentX);
+        setIsOosanWalking(true);
         const useNativeDriver = Platform.OS !== 'web';
         const dist = Math.hypot(targetX - currentX, targetY - currentY);
         const duration = Math.round(
@@ -1016,6 +1183,7 @@ const AppMain: React.FC = () => {
 
   const { width: screenWidth, height: screenHeight } = Dimensions.get('window');
   const lengthCm = Math.min(GROWTH_TARGET_CM, state.bodyLengthCm);
+  const isAdultOosan = lengthCm >= ADULT_OOSAN_MIN_LENGTH_CM;
   const lengthCmText = formatOosanLengthCm(lengthCm);
   const virtualNow = getNow();
   const isNight = computeIsNight(virtualNow);
@@ -1169,15 +1337,20 @@ const AppMain: React.FC = () => {
           >
             {imagesLoaded && (
               <ExpoImage
-                source={require('./assets/images/sansyo_toka2.gif')}
+                source={
+                  isAdultOosan
+                    ? ADULT_WALK_FRAMES[adultWalkFrameIndex]
+                    : require('./assets/images/sansyo_toka2.gif')
+                }
                 style={[
                   styles.oosan,
-                  { width: size, height: size * 0.8 },
+                  { width: size, height: isAdultOosan ? size * 0.55 : size * 0.8 },
                   isMovingRight && { transform: [{ scaleX: -1 }] },
                 ]}
                 contentFit="contain"
               />
             )}
+            {isPetting && <PetHeartBurst size={size} />}
           </Animated.View>
         )}
 
@@ -1190,13 +1363,33 @@ const AppMain: React.FC = () => {
         )}
 
         <View style={styles.bottomStack}>
-          <View style={styles.dailyLogStrip}>
-            <Animated.Text style={[styles.dailyLog, { opacity: dailyLogOpacity }]}>
-              {state.latestLog}
-            </Animated.Text>
-          </View>
-          {state.condition !== 'dead' && (
+          {state.condition === 'dead' ? (
+            <View style={styles.deadState}>
+              <View style={styles.deadMessagePanel}>
+                <Text style={styles.deadTitle} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.85}>
+                  オオサンショウウオは旅立ちました
+                </Text>
+                <Text style={styles.deadBody}>長いあいだ世話ができなかったため、命を終えました。</Text>
+                <Text style={styles.deadBody}>
+                  新しいオオサンショウウオを迎え、もう一度育て始めることができます。
+                </Text>
+              </View>
+              <TouchableOpacity
+                onPress={restartWithNewOosan}
+                accessibilityLabel="新しいオオサンショウウオを迎える"
+                activeOpacity={0.7}
+                style={styles.deadRestartAction}
+              >
+                <Text style={styles.deadRestartText}>新しいオオサンショウウオを迎える</Text>
+              </TouchableOpacity>
+            </View>
+          ) : (
             <>
+            <View style={styles.dailyLogStrip}>
+              <Animated.Text style={[styles.dailyLog, { opacity: dailyLogOpacity }]}>
+                {state.latestLog}
+              </Animated.Text>
+            </View>
             <View style={[styles.hudGlassPanel, styles.lengthHudPanel]}>
               <View style={styles.mainCounterRow}>
                 <Text style={styles.hudStatLabel}>体長</Text>
@@ -1398,6 +1591,9 @@ const AppMain: React.FC = () => {
       <DebugOverlay
         onApplyBodyLengthCm={applyDebugBodyLengthCm}
         onApplyGauges={applyDebugGauges}
+        onSetDead={applyDebugDeadState}
+        onSendInactivityReminder={() => void notifyInactivityReminderNow()}
+        onSendThirtyDayReminder={() => void notifyThirtyDayReminderNow()}
       />
     </View>
   );
@@ -1771,6 +1967,56 @@ const styles = StyleSheet.create({
     zIndex: 12,
     elevation: 10,
   },
+  deadState: {
+    alignItems: 'center',
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+  },
+  deadMessagePanel: {
+    alignSelf: 'stretch',
+    paddingHorizontal: 18,
+    paddingVertical: 16,
+    borderRadius: 14,
+    backgroundColor: 'rgba(8, 28, 34, 0.22)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.24)',
+  },
+  deadTitle: {
+    color: '#fff',
+    fontSize: 17,
+    fontWeight: '700',
+    lineHeight: 26,
+    textAlign: 'center',
+    textShadowColor: 'rgba(0, 0, 0, 0.6)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 3,
+  },
+  deadBody: {
+    color: 'rgba(255, 255, 255, 0.92)',
+    fontSize: 14,
+    lineHeight: 22,
+    marginTop: 8,
+    textAlign: 'center',
+    textShadowColor: 'rgba(0, 0, 0, 0.6)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 3,
+  },
+  deadRestartAction: {
+    marginTop: 18,
+    minWidth: 260,
+    paddingVertical: 14,
+    paddingHorizontal: 20,
+    borderRadius: 14,
+    backgroundColor: 'rgba(33, 150, 243, 0.88)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.2)',
+  },
+  deadRestartText: {
+    color: '#fff',
+    fontSize: 15,
+    fontWeight: '700',
+    textAlign: 'center',
+  },
   dailyLogStrip: {
     width: '100%',
     alignItems: 'center',
@@ -1895,6 +2141,21 @@ const styles = StyleSheet.create({
   oosan: {
     width: 100,
     height: 80,
+  },
+  petHeartLayer: {
+    position: 'absolute',
+    left: '50%',
+    top: 0,
+    overflow: 'visible',
+  },
+  petHeart: {
+    position: 'absolute',
+    color: '#ff5b8a',
+    fontSize: 30,
+    fontWeight: '900',
+    textShadowColor: 'rgba(255, 255, 255, 0.75)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
   },
   dailyLog: {
     color: 'rgba(255, 255, 255, 0.8)',

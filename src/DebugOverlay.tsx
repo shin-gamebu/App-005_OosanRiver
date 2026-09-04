@@ -34,21 +34,42 @@ export type DebugGaugePatch = {
 type Props = {
   onApplyBodyLengthCm: (cm: number) => void;
   onApplyGauges: (patch: DebugGaugePatch) => void;
+  onSetDead: () => void;
+  onSendInactivityReminder: () => void;
+  onSendThirtyDayReminder: () => void;
 };
 
 /**
  * development のみ描画。本番ビルドでは null（ストア公開時もデバッグは出ない）。
  */
-export function DebugOverlay({ onApplyBodyLengthCm, onApplyGauges }: Props) {
+export function DebugOverlay({
+  onApplyBodyLengthCm,
+  onApplyGauges,
+  onSetDead,
+  onSendInactivityReminder,
+  onSendThirtyDayReminder,
+}: Props) {
   if (!IS_DEV) {
     return null;
   }
   return (
-    <DebugOverlayInner onApplyBodyLengthCm={onApplyBodyLengthCm} onApplyGauges={onApplyGauges} />
+    <DebugOverlayInner
+      onApplyBodyLengthCm={onApplyBodyLengthCm}
+      onApplyGauges={onApplyGauges}
+      onSetDead={onSetDead}
+      onSendInactivityReminder={onSendInactivityReminder}
+      onSendThirtyDayReminder={onSendThirtyDayReminder}
+    />
   );
 }
 
-function DebugOverlayInner({ onApplyBodyLengthCm, onApplyGauges }: Props) {
+function DebugOverlayInner({
+  onApplyBodyLengthCm,
+  onApplyGauges,
+  onSetDead,
+  onSendInactivityReminder,
+  onSendThirtyDayReminder,
+}: Props) {
   const {
     setTimeOffsetMs,
     setDebugNightCareMultiplier,
@@ -91,7 +112,13 @@ function DebugOverlayInner({ onApplyBodyLengthCm, onApplyGauges }: Props) {
 
   const virtualLabel = () => {
     const d = getNow();
-    return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
+    return `${d.getFullYear()}/${(d.getMonth() + 1).toString().padStart(2, '0')}/${d
+      .getDate()
+      .toString()
+      .padStart(2, '0')} ${d.getHours().toString().padStart(2, '0')}:${d
+      .getMinutes()
+      .toString()
+      .padStart(2, '0')}`;
   };
 
   return (
@@ -162,6 +189,27 @@ function DebugOverlayInner({ onApplyBodyLengthCm, onApplyGauges }: Props) {
               }}
             >
               <Text style={styles.btnText}>Reset 時刻（実時刻に戻す）</Text>
+            </TouchableOpacity>
+
+            <Text style={styles.section}>通知テスト</Text>
+            <Text style={styles.subHint}>通知を待たずに、その場で表示を確認できます。</Text>
+            <TouchableOpacity
+              style={[styles.btn, styles.btnWide]}
+              onPress={() => {
+                onSendInactivityReminder();
+                setOpen(false);
+              }}
+            >
+              <Text style={styles.btnText}>14日後の通知を送る</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.btn, styles.btnWide]}
+              onPress={() => {
+                onSendThirtyDayReminder();
+                setOpen(false);
+              }}
+            >
+              <Text style={styles.btnText}>30日後の通知を送る</Text>
             </TouchableOpacity>
 
             <Text style={styles.section}>体長 (cm)</Text>
@@ -239,6 +287,19 @@ function DebugOverlayInner({ onApplyBodyLengthCm, onApplyGauges }: Props) {
                 <Text style={styles.btnText}>ヌメリ 1%</Text>
               </TouchableOpacity>
             </View>
+
+            <Text style={styles.section}>状態</Text>
+            <Text style={styles.subHint}>死亡画面と再スタートの確認用です。保存後も死亡状態になります。</Text>
+            <TouchableOpacity
+              style={[styles.btnDanger, styles.btnWide, styles.btnDangerCompact]}
+              onPress={() => {
+                Keyboard.dismiss();
+                onSetDead();
+                setOpen(false);
+              }}
+            >
+              <Text style={styles.btnDangerText}>死亡状態にする</Text>
+            </TouchableOpacity>
 
             <TouchableOpacity style={[styles.btnDanger, styles.btnWide]} onPress={resetEverything}>
               <Text style={styles.btnDangerText}>すべてのデバッグ設定をリセット</Text>
@@ -391,6 +452,9 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '700',
     textAlign: 'center',
+  },
+  btnDangerCompact: {
+    marginTop: 0,
   },
   btnGhost: {
     paddingVertical: 12,

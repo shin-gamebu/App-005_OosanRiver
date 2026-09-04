@@ -1,13 +1,22 @@
 import { Platform } from 'react-native';
 import * as Notifications from 'expo-notifications';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import type { AppState } from './logic';
-import { backgroundGaugeDecayMultiplier } from './logic';
+import {
+  backgroundGaugeDecayMultiplier,
+  DAYS_UNTIL_DEATH,
+  DAYS_UNTIL_INACTIVITY_REMINDER,
+} from './logic';
 
 const CHANNEL_CARE = 'care-gauge-alerts';
+const INACTIVITY_NOTIFICATION_ID_KEY = 'oosanRiverInactivityNotificationId';
+const THIRTY_DAY_NOTIFICATION_ID_KEY = 'oosanRiverThirtyDayNotificationId';
 
 let handlerRegistered = false;
 let scheduledFullnessAlertId: string | null = null;
 let scheduledViscosityAlertId: string | null = null;
+let scheduledInactivityAlertId: string | null = null;
+let scheduledThirtyDayAlertId: string | null = null;
 
 function registerHandler(): void {
   if (Platform.OS === 'web' || handlerRegistered) return;
@@ -25,7 +34,7 @@ function registerHandler(): void {
 async function ensureAndroidChannel(): Promise<void> {
   if (Platform.OS !== 'android') return;
   await Notifications.setNotificationChannelAsync(CHANNEL_CARE, {
-    name: 'おなか・ヌメリ',
+    name: '育成のお知らせ',
     importance: Notifications.AndroidImportance.HIGH,
     vibrationPattern: [0, 200, 120, 200],
     lightColor: '#4a90a4',
@@ -49,6 +58,69 @@ async function cancelPredictiveSchedules(): Promise<void> {
     }
     scheduledViscosityAlertId = null;
   }
+  const inactivityId =
+    scheduledInactivityAlertId ?? (await AsyncStorage.getItem(INACTIVITY_NOTIFICATION_ID_KEY));
+  if (inactivityId) {
+    try {
+      await Notifications.cancelScheduledNotificationAsync(inactivityId);
+    } catch {
+      /* すでに配信済み・削除済みの場合もある */
+    }
+  }
+  scheduledInactivityAlertId = null;
+  await AsyncStorage.removeItem(INACTIVITY_NOTIFICATION_ID_KEY);
+
+  const thirtyDayId =
+    scheduledThirtyDayAlertId ?? (await AsyncStorage.getItem(THIRTY_DAY_NOTIFICATION_ID_KEY));
+  if (thirtyDayId) {
+    try {
+      await Notifications.cancelScheduledNotificationAsync(thirtyDayId);
+    } catch {
+      /* すでに配信済み・削除済みの場合もある */
+    }
+  }
+  scheduledThirtyDayAlertId = null;
+  await AsyncStorage.removeItem(THIRTY_DAY_NOTIFICATION_ID_KEY);
+}
+
+/** 最後に開いたあと14日経過した頃に、再訪を促す通知を予約する。 */
+async function scheduleInactivityReminder(): Promise<void> {
+  const seconds = DAYS_UNTIL_INACTIVITY_REMINDER * 24 * 60 * 60;
+  const trigger = {
+    type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
+    seconds,
+    ...(Platform.OS === 'android' ? { channelId: CHANNEL_CARE } : {}),
+  } as const;
+  scheduledInactivityAlertId = await Notifications.scheduleNotificationAsync({
+    content: {
+      title: 'しばらく会えていません',
+      body: 'オオサンショウウオが弱っています。会いにいきましょう。',
+      data: { type: 'inactivity_reminder' },
+      sound: true,
+    },
+    trigger,
+  });
+  await AsyncStorage.setItem(INACTIVITY_NOTIFICATION_ID_KEY, scheduledInactivityAlertId);
+}
+
+/** 最後に開いたあと30日経過した頃に、最終の再訪通知を予約する。 */
+async function scheduleThirtyDayReminder(): Promise<void> {
+  const seconds = DAYS_UNTIL_DEATH * 24 * 60 * 60;
+  const trigger = {
+    type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
+    seconds,
+    ...(Platform.OS === 'android' ? { channelId: CHANNEL_CARE } : {}),
+  } as const;
+  scheduledThirtyDayAlertId = await Notifications.scheduleNotificationAsync({
+    content: {
+      title: '30日間会えていません',
+      body: 'オオサンショウウオが、静かに旅立とうとしています。会いにいきましょう。',
+      data: { type: 'thirty_day_reminder' },
+      sound: true,
+    },
+    trigger,
+  });
+  await AsyncStorage.setItem(THIRTY_DAY_NOTIFICATION_ID_KEY, scheduledThirtyDayAlertId);
 }
 
 function estimateSecondsToZero(
@@ -149,6 +221,10 @@ export async function schedulePredictiveGaugeAlerts(
         trigger: triggerVis,
       });
     }
+    if (state.condition !== 'dead') {
+      await scheduleInactivityReminder();
+      await scheduleThirtyDayReminder();
+    }
   } catch (e) {
     console.warn('schedulePredictiveGaugeAlerts:', e);
   }
@@ -172,6 +248,24 @@ export async function notifyViscosityEmptyNow(): Promise<void> {
     'ヌメリがかわきました',
     'Water でヌメリを補給しましょう。',
     'viscosity_empty'
+  );
+}
+
+/** 開発時の通知表示確認用。14日ぶりの再訪メッセージを即時送信する。 */
+export async function notifyInactivityReminderNow(): Promise<void> {
+  await sendImmediateNotification(
+    'しばらく会えていません',
+    'オオサンショウウオが弱っています。会いにいきましょう。',
+    'inactivity_reminder_test'
+  );
+}
+
+/** 開発時の通知表示確認用。30日ぶりの再訪メッセージを即時送信する。 */
+export async function notifyThirtyDayReminderNow(): Promise<void> {
+  await sendImmediateNotification(
+    '30日間会えていません',
+    'オオサンショウウオが、静かに旅立とうとしています。会いにいきましょう。',
+    'thirty_day_reminder_test'
   );
 }
 

@@ -3,14 +3,15 @@
     "name": "オオサンショウウオ育成",
     "slug": "oosan-river",
     "version": "1.0.0",
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/d88ee4be-8dfd-4820-b789-a4a353504878"
+    },
     "orientation": "portrait",
     "icon": "./assets/images/baby_oosan_square.png",
     "userInterfaceStyle": "light",
-    "splash": {
-      "image": "./assets/images/baby_oosan.png",
-      "resizeMode": "contain",
-      "backgroundColor": "#4a90a4"
-    },
     "assetBundlePatterns": [
       "**/*"
     ],
@@ -33,6 +34,14 @@
       "package": "com.oosanriver.app"
     },
     "plugins": [
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/images/baby_oosan.png",
+          "resizeMode": "contain",
+          "backgroundColor": "#4a90a4"
+        }
+      ],
       "expo-asset",
       [
         "expo-notifications",
@@ -42,7 +51,9 @@
         }
       ],
       "expo-font",
-      "expo-video"
+      "expo-video",
+      "expo-image",
+      "expo-status-bar"
     ],
     "extra": {
       "eas": {

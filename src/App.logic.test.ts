@@ -351,14 +351,14 @@ describe('ロジック関数のテスト', () => {
       expect(result.lastVisitDate).toBe(today);
     });
 
-    test('3日放置でweakになる', () => {
+    test('14日放置でweakになる', () => {
       const today = new Date().toISOString().split('T')[0];
-      const threeDaysAgo = new Date(Date.now() - 3 * 86400000).toISOString().split('T')[0];
+      const fourteenDaysAgo = new Date(Date.now() - 14 * 86400000).toISOString().split('T')[0];
       
       const state: AppState = {
         startDate: '2024-01-01',
-        lastVisitDate: threeDaysAgo,
-        lastGrowthDate: threeDaysAgo,
+        lastVisitDate: fourteenDaysAgo,
+        lastGrowthDate: fourteenDaysAgo,
         sizeFactor: 1.0,
         growthAnchorMs: 0,
         bodyLengthCm: 0,
@@ -377,14 +377,14 @@ describe('ロジック関数のテスト', () => {
       expect(result.lastVisitDate).toBe(today);
     });
 
-    test('7日放置でdeadになる', () => {
+    test('30日放置でdeadになる', () => {
       const today = new Date().toISOString().split('T')[0];
-      const sevenDaysAgo = new Date(Date.now() - 7 * 86400000).toISOString().split('T')[0];
+      const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
       
       const state: AppState = {
         startDate: '2024-01-01',
-        lastVisitDate: sevenDaysAgo,
-        lastGrowthDate: sevenDaysAgo,
+        lastVisitDate: thirtyDaysAgo,
+        lastGrowthDate: thirtyDaysAgo,
         sizeFactor: 1.0,
         growthAnchorMs: 0,
         bodyLengthCm: 0,
