@@ -20,9 +20,6 @@ jobs:
     timeout-minutes: 60
     env:
       IOS_BUILD_NUMBER: ${{ inputs.build_number }}
-      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-      PROVISIONING_PROFILE_NAME: ${{ secrets.PROVISIONING_PROFILE_NAME }}
-      KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
 
@@ -40,57 +37,15 @@ jobs:
           eas-version: latest
           token: ${{ secrets.EXPO_TOKEN }}
 
-      - name: Generate iOS project
-        run: npx expo prebuild --platform ios --clean --no-install
-
-      - name: Install signing certificate and provisioning profile
-        env:
-          DISTRIBUTION_CERT_BASE64: ${{ secrets.DISTRIBUTION_CERT_BASE64 }}
-          DISTRIBUTION_CERT_PASSWORD: ${{ secrets.DISTRIBUTION_CERT_PASSWORD }}
-          PROVISIONING_PROFILE_BASE64: ${{ secrets.PROVISIONING_PROFILE_BASE64 }}
-        run: |
-          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          echo -n "$DISTRIBUTION_CERT_BASE64" | base64 --decode -o "$RUNNER_TEMP/distribution.p12"
-          security import "$RUNNER_TEMP/distribution.p12" -P "$DISTRIBUTION_CERT_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
-          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security list-keychain -d user -s "$KEYCHAIN_PATH"
-          echo -n "$PROVISIONING_PROFILE_BASE64" | base64 --decode -o "$RUNNER_TEMP/profile.mobileprovision"
-          PROFILE_UUID=$(/usr/libexec/PlistBuddy -c "Print UUID" /dev/stdin <<< "$(/usr/bin/security cms -D -i "$RUNNER_TEMP/profile.mobileprovision")")
-          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
-          cp "$RUNNER_TEMP/profile.mobileprovision" "$HOME/Library/MobileDevice/Provisioning Profiles/$PROFILE_UUID.mobileprovision"
-
-      - name: Build IPA
-        run: |
-          cd ios
-          pod install
-          WORKSPACE=$(find . -maxdepth 2 -name '*.xcworkspace' -print -quit)
-          SCHEME=$(xcodebuild -list -workspace "$WORKSPACE" | awk '/Schemes:/{found=1;next} found && NF {print $1; exit}')
-          xcodebuild -workspace "$WORKSPACE" -scheme "$SCHEME" -configuration Release -sdk iphoneos -archivePath "$RUNNER_TEMP/oosan-river.xcarchive" archive CODE_SIGN_STYLE=Manual PROVISIONING_PROFILE_SPECIFIER="$PROVISIONING_PROFILE_NAME" CODE_SIGN_IDENTITY="Apple Distribution" DEVELOPMENT_TEAM="$APPLE_TEAM_ID"
-          cat > "$RUNNER_TEMP/ExportOptions.plist" <<EOF
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0"><dict>
-            <key>method</key><string>app-store-connect</string>
-            <key>teamID</key><string>$APPLE_TEAM_ID</string>
-            <key>signingStyle</key><string>manual</string>
-            <key>provisioningProfiles</key><dict><key>com.oosanriver.app</key><string>$PROVISIONING_PROFILE_NAME</string></dict>
-          </dict></plist>
-          EOF
-          xcodebuild -exportArchive -archivePath "$RUNNER_TEMP/oosan-river.xcarchive" -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist" -exportPath "$RUNNER_TEMP/export"
+      - name: Build signed IPA on the GitHub macOS runner
+        run: npx eas-cli@latest build --platform ios --profile production --local --output "$RUNNER_TEMP/oosan-river.ipa" --non-interactive
 
       - name: Save IPA
         uses: actions/upload-artifact@v4
         with:
           name: oosan-river-ios-${{ inputs.build_number }}
-          path: ${{ runner.temp }}/export/*.ipa
+          path: ${{ runner.temp }}/oosan-river.ipa
 
       - name: Upload to App Store Connect
         if: ${{ inputs.submit }}
-        run: npx eas-cli@latest submit --platform ios --path "$RUNNER_TEMP/export"/*.ipa --profile production --non-interactive
-
-      - name: Remove temporary signing keychain
-        if: always()
-        run: security delete-keychain "$RUNNER_TEMP/app-signing.keychain-db" || true
+        run: npx eas-cli@latest submit --platform ios --path "$RUNNER_TEMP/oosan-river.ipa" --profile production --non-interactive
