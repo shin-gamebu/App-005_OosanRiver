@@ -1,6 +1,6 @@
 {
   "compilerOptions": {
-    "target": "es5",
+    "target": "es2017",
     "lib": [
       "dom",
       "dom.iterable",
@@ -14,15 +14,16 @@
     "forceConsistentCasingInFileNames": true,
     "noFallthroughCasesInSwitch": true,
     "module": "esnext",
-    "moduleResolution": "node",
+    "moduleResolution": "bundler",
     "resolveJsonModule": true,
     "isolatedModules": true,
     "noEmit": true,
     "jsx": "react-jsx",
     "types": [
-      "jest",
-      "@testing-library/jest-dom"
-    ]
+      "jest"
+    ],
+    "rootDir": ".",
+    "ignoreDeprecations": "6.0"
   },
   "include": [
     "src"

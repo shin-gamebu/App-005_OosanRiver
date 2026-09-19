@@ -362,15 +362,8 @@ export function applyOfflineCatchUp(
   while (t + SIM_STEP_MS <= delta) {
     t += SIM_STEP_MS;
     const stepMs = from + t;
-    const d = new Date(stepMs);
-    const night = computeIsNight(d);
-    const mult = computeGrowthMultiplier(s.fullness, s.viscosity, night);
     const sec = SIM_STEP_MS / 1000;
     const bgm = backgroundGaugeDecayMultiplier(s, stepMs);
-    s.bodyLengthCm = Math.min(
-      GROWTH_TARGET_CM,
-      s.bodyLengthCm + GROWTH_CM_PER_SECOND * mult * sec
-    );
     s.fullness = Math.max(0, s.fullness - fullnessDecayPerSecBase * bgm * sec);
     s.viscosity = Math.max(0, s.viscosity - viscosityDecayPerSecBase * bgm * sec);
   }
@@ -379,14 +372,7 @@ export function applyOfflineCatchUp(
   if (remMs >= 1000) {
     const sec = remMs / 1000;
     const tailMs = from + delta;
-    const d = new Date(tailMs);
-    const night = computeIsNight(d);
-    const mult = computeGrowthMultiplier(s.fullness, s.viscosity, night);
     const bgm = backgroundGaugeDecayMultiplier(s, tailMs);
-    s.bodyLengthCm = Math.min(
-      GROWTH_TARGET_CM,
-      s.bodyLengthCm + GROWTH_CM_PER_SECOND * mult * sec
-    );
     s.fullness = Math.max(0, s.fullness - fullnessDecayPerSecBase * bgm * sec);
     s.viscosity = Math.max(0, s.viscosity - viscosityDecayPerSecBase * bgm * sec);
   }

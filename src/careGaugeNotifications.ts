@@ -9,12 +9,16 @@ import {
 } from './logic';
 
 const CHANNEL_CARE = 'care-gauge-alerts';
+const CARE_NOTIFICATION_ID_KEY = 'oosanRiverCareNotificationId';
+const CARE_REMINDER_NOTIFICATION_ID_KEY = 'oosanRiverCareReminderNotificationId';
+const CARE_FOLLOW_UP_NOTIFICATION_ID_KEY = 'oosanRiverCareFollowUpNotificationId';
 const INACTIVITY_NOTIFICATION_ID_KEY = 'oosanRiverInactivityNotificationId';
 const THIRTY_DAY_NOTIFICATION_ID_KEY = 'oosanRiverThirtyDayNotificationId';
 
 let handlerRegistered = false;
-let scheduledFullnessAlertId: string | null = null;
-let scheduledViscosityAlertId: string | null = null;
+let scheduledCareInitialAlertId: string | null = null;
+let scheduledCareReminderAlertId: string | null = null;
+let scheduledCareFollowUpAlertId: string | null = null;
 let scheduledInactivityAlertId: string | null = null;
 let scheduledThirtyDayAlertId: string | null = null;
 
@@ -42,22 +46,36 @@ async function ensureAndroidChannel(): Promise<void> {
 }
 
 async function cancelPredictiveSchedules(): Promise<void> {
-  if (scheduledFullnessAlertId) {
+  const initialCareId = scheduledCareInitialAlertId ?? (await AsyncStorage.getItem(CARE_NOTIFICATION_ID_KEY));
+  if (initialCareId) {
     try {
-      await Notifications.cancelScheduledNotificationAsync(scheduledFullnessAlertId);
+      await Notifications.cancelScheduledNotificationAsync(initialCareId);
     } catch {
       /* noop */
     }
-    scheduledFullnessAlertId = null;
   }
-  if (scheduledViscosityAlertId) {
+  const reminderCareId = scheduledCareReminderAlertId ?? (await AsyncStorage.getItem(CARE_REMINDER_NOTIFICATION_ID_KEY));
+  if (reminderCareId) {
     try {
-      await Notifications.cancelScheduledNotificationAsync(scheduledViscosityAlertId);
+      await Notifications.cancelScheduledNotificationAsync(reminderCareId);
     } catch {
       /* noop */
     }
-    scheduledViscosityAlertId = null;
   }
+  const followUpCareId = scheduledCareFollowUpAlertId ?? (await AsyncStorage.getItem(CARE_FOLLOW_UP_NOTIFICATION_ID_KEY));
+  if (followUpCareId) {
+    try {
+      await Notifications.cancelScheduledNotificationAsync(followUpCareId);
+    } catch {
+      /* noop */
+    }
+  }
+  scheduledCareInitialAlertId = null;
+  scheduledCareReminderAlertId = null;
+  scheduledCareFollowUpAlertId = null;
+  await AsyncStorage.removeItem(CARE_NOTIFICATION_ID_KEY);
+  await AsyncStorage.removeItem(CARE_REMINDER_NOTIFICATION_ID_KEY);
+  await AsyncStorage.removeItem(CARE_FOLLOW_UP_NOTIFICATION_ID_KEY);
   const inactivityId =
     scheduledInactivityAlertId ?? (await AsyncStorage.getItem(INACTIVITY_NOTIFICATION_ID_KEY));
   if (inactivityId) {
@@ -131,12 +149,35 @@ function estimateSecondsToZero(
 ): number | null {
   if (pct <= 0 || state.condition === 'dead') return null;
   const bgm = backgroundGaugeDecayMultiplier(state, atMs);
-  const rate = decayPerSecondBase * bgm * 0.9;
+  // ゲージが0%になる到達時刻に通知する。少し前倒しにはしない。
+  const rate = decayPerSecondBase * bgm;
   if (rate <= 0) return null;
   const sec = Math.ceil(pct / rate);
   if (sec < 5) return 5;
   if (sec > 3600 * 24 * 14) return null;
   return sec;
+}
+
+function careAlertCopy(fullnessEmpty: boolean, viscosityEmpty: boolean): { title: string; body: string; type: string } {
+  if (fullnessEmpty && viscosityEmpty) {
+    return {
+      title: 'おなかとぬめりが0%になりました',
+      body: 'オオサンショウウオにごはんとおみずをあげましょう。',
+      type: 'care_empty_both',
+    };
+  }
+  if (fullnessEmpty) {
+    return {
+      title: 'おなかがすきました',
+      body: 'オオサンショウウオにごはんをあげましょう。',
+      type: 'care_empty_feed',
+    };
+  }
+  return {
+    title: 'ヌメリがかわきました',
+    body: 'オオサンショウウオにおみずをあげましょう。',
+    type: 'care_empty_water',
+  };
 }
 
 /** 起動時: チャネル・通知許可（ロック画面／通知センター用） */
@@ -152,7 +193,8 @@ export async function prepareCareGaugeNotifications(): Promise<void> {
 
 /**
  * ホーム切り替え・画面オフ時に OS が配信する「予約通知」。
- * アプリが止まっていても、おおよその 0% 到達時刻にロック画面へ届く。
+ * おなか・ヌメリが両方0%になった時に1件だけ送り、放置中は3日後・7日後にだけ再通知する。
+ * 以後は既存の14日後・30日後の再訪通知へ引き継ぐ。
  */
 export async function schedulePredictiveGaugeAlerts(
   state: AppState,
@@ -166,6 +208,7 @@ export async function schedulePredictiveGaugeAlerts(
   await cancelPredictiveSchedules();
   const { status } = await Notifications.getPermissionsAsync();
   if (status !== 'granted') return;
+  if (state.condition === 'dead') return;
 
   const fSec = estimateSecondsToZero(
     state.fullness,
@@ -180,51 +223,54 @@ export async function schedulePredictiveGaugeAlerts(
     atMs
   );
 
-  const triggerFull =
-    fSec != null
-      ? ({
-          type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
-          seconds: fSec,
-          ...(Platform.OS === 'android' ? { channelId: CHANNEL_CARE } : {}),
-        } as const)
-      : null;
+  const bothAlreadyEmpty = state.fullness <= 0 && state.viscosity <= 0;
+  const secondsUntilBothEmpty = Math.max(fSec ?? 0, vSec ?? 0);
+  if (!bothAlreadyEmpty && !Number.isFinite(secondsUntilBothEmpty)) return;
 
-  const triggerVis =
-    vSec != null
-      ? ({
-          type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
-          seconds: Math.max(5, vSec + (vSec === fSec ? 3 : 0)),
-          ...(Platform.OS === 'android' ? { channelId: CHANNEL_CARE } : {}),
-        } as const)
-      : null;
+  const firstAlert = careAlertCopy(true, true);
+  const reminderAlert = careAlertCopy(true, true);
+  const followUpAlert = careAlertCopy(true, true);
+  const threeDaysSeconds = 3 * 24 * 60 * 60;
+  const sevenDaysSeconds = 7 * 24 * 60 * 60;
+  const initialDelaySeconds = bothAlreadyEmpty ? 0 : Math.max(60, secondsUntilBothEmpty);
 
   try {
-    if (triggerFull) {
-      scheduledFullnessAlertId = await Notifications.scheduleNotificationAsync({
-        content: {
-          title: 'おなかがすきました',
-          body: 'オオサンショウウオにエサ（Feed）をあげましょう。',
-          data: { type: 'fullness_empty_scheduled' },
-          sound: true,
-        },
-        trigger: triggerFull,
+    if (!bothAlreadyEmpty) {
+      const initialTrigger = {
+        type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
+        seconds: initialDelaySeconds,
+        ...(Platform.OS === 'android' ? { channelId: CHANNEL_CARE } : {}),
+      } as const;
+      scheduledCareInitialAlertId = await Notifications.scheduleNotificationAsync({
+        content: { title: firstAlert.title, body: firstAlert.body, data: { type: firstAlert.type }, sound: true },
+        trigger: initialTrigger,
       });
+      await AsyncStorage.setItem(CARE_NOTIFICATION_ID_KEY, scheduledCareInitialAlertId);
     }
-    if (triggerVis) {
-      scheduledViscosityAlertId = await Notifications.scheduleNotificationAsync({
-        content: {
-          title: 'ヌメリがかわきました',
-          body: 'Water でヌメリを補給しましょう。',
-          data: { type: 'viscosity_empty_scheduled' },
-          sound: true,
-        },
-        trigger: triggerVis,
-      });
-    }
-    if (state.condition !== 'dead') {
-      await scheduleInactivityReminder();
-      await scheduleThirtyDayReminder();
-    }
+
+    const reminderTrigger = {
+      type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
+      seconds: initialDelaySeconds + threeDaysSeconds,
+      ...(Platform.OS === 'android' ? { channelId: CHANNEL_CARE } : {}),
+    } as const;
+    scheduledCareReminderAlertId = await Notifications.scheduleNotificationAsync({
+      content: { title: reminderAlert.title, body: reminderAlert.body, data: { type: reminderAlert.type }, sound: true },
+      trigger: reminderTrigger,
+    });
+    await AsyncStorage.setItem(CARE_REMINDER_NOTIFICATION_ID_KEY, scheduledCareReminderAlertId);
+
+    const followUpTrigger = {
+      type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
+      seconds: initialDelaySeconds + sevenDaysSeconds,
+      ...(Platform.OS === 'android' ? { channelId: CHANNEL_CARE } : {}),
+    } as const;
+    scheduledCareFollowUpAlertId = await Notifications.scheduleNotificationAsync({
+      content: { title: followUpAlert.title, body: followUpAlert.body, data: { type: followUpAlert.type }, sound: true },
+      trigger: followUpTrigger,
+    });
+    await AsyncStorage.setItem(CARE_FOLLOW_UP_NOTIFICATION_ID_KEY, scheduledCareFollowUpAlertId);
+    await scheduleInactivityReminder();
+    await scheduleThirtyDayReminder();
   } catch (e) {
     console.warn('schedulePredictiveGaugeAlerts:', e);
   }
@@ -235,19 +281,12 @@ export async function clearPredictiveGaugeAlerts(): Promise<void> {
   await cancelPredictiveSchedules();
 }
 
-export async function notifyFullnessEmptyNow(): Promise<void> {
+/** 開発用: おなか・ヌメリが両方空いた通知をすぐ確認する。 */
+export async function notifyCareEmptyNow(): Promise<void> {
   await sendImmediateNotification(
-    'おなかがすきました',
-    'オオサンショウウオにエサ（Feed）をあげましょう。',
-    'fullness_empty'
-  );
-}
-
-export async function notifyViscosityEmptyNow(): Promise<void> {
-  await sendImmediateNotification(
-    'ヌメリがかわきました',
-    'Water でヌメリを補給しましょう。',
-    'viscosity_empty'
+    'おなかとぬめりが0%になりました',
+    'オオサンショウウオにごはんとおみずをあげましょう。',
+    'care_empty_test'
   );
 }
 

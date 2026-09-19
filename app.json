@@ -10,7 +10,7 @@
       "url": "https://u.expo.dev/d88ee4be-8dfd-4820-b789-a4a353504878"
     },
     "orientation": "portrait",
-    "icon": "./assets/images/baby_oosan_square.png",
+    "icon": "./assets/images/baby_oosan_square_kamogawa_icon.png",
     "userInterfaceStyle": "light",
     "assetBundlePatterns": [
       "**/*"
@@ -28,7 +28,7 @@
     },
     "android": {
       "adaptiveIcon": {
-        "foregroundImage": "./assets/images/baby_oosan_square.png",
+        "foregroundImage": "./assets/images/baby_oosan_square_kamogawa_icon.png",
         "backgroundColor": "#4a90a4"
       },
       "package": "com.oosanriver.app"
@@ -37,9 +37,10 @@
       [
         "expo-splash-screen",
         {
-          "image": "./assets/images/baby_oosan.png",
-          "resizeMode": "contain",
-          "backgroundColor": "#4a90a4"
+          "image": "./assets/images/splash_oosan_final.png",
+          "resizeMode": "cover",
+          "enableFullScreenImage_legacy": true,
+          "backgroundColor": "#91d3e3"
         }
       ],
       "expo-asset",

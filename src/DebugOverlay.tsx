@@ -14,11 +14,19 @@ import {
 import { useDebugTime } from './DebugTimeContext';
 import {
   DEFAULT_NIGHT_CARE_MULTIPLIER,
+  affectionValueForLevel,
+  MAX_AFFECTION_LEVEL,
   GROWTH_CM_PER_SECOND,
   GROWTH_TARGET_CM,
 } from './logic';
 
-const IS_DEV = process.env.NODE_ENV === 'development';
+/**
+ * 通常の開発サーバーでは常に表示する。TestFlight で育成や通知を確認する
+ * 専用ビルドだけは、EAS の testflight-debug プロファイルからこの値を埋め込む。
+ * App Store 提出版（production）にはこの環境変数を設定しないため表示されない。
+ */
+const IS_DEBUG_BUILD =
+  __DEV__ || process.env.EXPO_PUBLIC_ENABLE_TEST_DEBUG === 'true';
 
 function offsetForLocalToday(hour: number, minute: number): number {
   const d = new Date();
@@ -33,30 +41,42 @@ export type DebugGaugePatch = {
 
 type Props = {
   onApplyBodyLengthCm: (cm: number) => void;
+  onApplyAffection: (value: number) => void;
+  onResetPetCount: () => void;
+  onResetDailyMissions: () => void;
   onApplyGauges: (patch: DebugGaugePatch) => void;
   onSetDead: () => void;
+  onSendCareAlert: () => void;
   onSendInactivityReminder: () => void;
   onSendThirtyDayReminder: () => void;
 };
 
 /**
- * development のみ描画。本番ビルドでは null（ストア公開時もデバッグは出ない）。
+ * 開発中とTestFlight確認専用ビルドでのみ描画。公開用ビルドでは null。
  */
 export function DebugOverlay({
   onApplyBodyLengthCm,
+  onApplyAffection,
+  onResetPetCount,
+  onResetDailyMissions,
   onApplyGauges,
   onSetDead,
+  onSendCareAlert,
   onSendInactivityReminder,
   onSendThirtyDayReminder,
 }: Props) {
-  if (!IS_DEV) {
+  if (!IS_DEBUG_BUILD) {
     return null;
   }
   return (
     <DebugOverlayInner
       onApplyBodyLengthCm={onApplyBodyLengthCm}
+      onApplyAffection={onApplyAffection}
+      onResetPetCount={onResetPetCount}
+      onResetDailyMissions={onResetDailyMissions}
       onApplyGauges={onApplyGauges}
       onSetDead={onSetDead}
+      onSendCareAlert={onSendCareAlert}
       onSendInactivityReminder={onSendInactivityReminder}
       onSendThirtyDayReminder={onSendThirtyDayReminder}
     />
@@ -65,8 +85,12 @@ export function DebugOverlay({
 
 function DebugOverlayInner({
   onApplyBodyLengthCm,
+  onApplyAffection,
+  onResetPetCount,
+  onResetDailyMissions,
   onApplyGauges,
   onSetDead,
+  onSendCareAlert,
   onSendInactivityReminder,
   onSendThirtyDayReminder,
 }: Props) {
@@ -81,13 +105,14 @@ function DebugOverlayInner({
 
   const [open, setOpen] = useState(false);
   const [sizeDraft, setSizeDraft] = useState('');
+  const [affectionDraft, setAffectionDraft] = useState('');
 
   /** 体長は入力欄に入れたあと「適用」で反映してメニューを閉じる */
   const applySize = () => {
     Keyboard.dismiss();
     const n = parseFloat(sizeDraft.replace(/,/g, '.'));
     if (!Number.isFinite(n) || n < 0) return;
-    onApplyBodyLengthCm(Math.min(GROWTH_TARGET_CM, n));
+    onApplyBodyLengthCm(n);
     setOpen(false);
   };
 
@@ -101,6 +126,17 @@ function DebugOverlayInner({
   const fill199Draft = () => {
     Keyboard.dismiss();
     setSizeDraft('19.9');
+  };
+
+  const applyAffection = () => {
+    Keyboard.dismiss();
+    const n = parseInt(affectionDraft, 10);
+    if (!Number.isFinite(n)) return;
+    const level = Math.max(1, Math.min(MAX_AFFECTION_LEVEL, n));
+    // 内部値は「なでた回数」だが、デバッグ欄は分かりやすくLvを直接受け取る。
+    const affectionValue = affectionValueForLevel(level);
+    onApplyAffection(affectionValue);
+    setOpen(false);
   };
 
   const resetEverything = () => {
@@ -196,6 +232,15 @@ function DebugOverlayInner({
             <TouchableOpacity
               style={[styles.btn, styles.btnWide]}
               onPress={() => {
+                onSendCareAlert();
+                setOpen(false);
+              }}
+            >
+              <Text style={styles.btnText}>お世話通知を送る</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.btn, styles.btnWide]}
+              onPress={() => {
                 onSendInactivityReminder();
                 setOpen(false);
               }}
@@ -257,8 +302,59 @@ function DebugOverlayInner({
               <Text style={styles.btnText}>19.9cm（変態直前）</Text>
             </TouchableOpacity>
 
+            <Text style={styles.section}>なつきLv.</Text>
+            <Text style={styles.subHint}>1〜100を入力。入力したLvへ直接変更します。</Text>
+            <View style={styles.presetRow}>
+              <TouchableOpacity style={styles.btnPreset} onPress={() => setAffectionDraft('1')}>
+                <Text style={styles.btnPresetText}>Lv.1</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.btnPreset} onPress={() => setAffectionDraft('5')}>
+                <Text style={styles.btnPresetText}>Lv.5</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.btnPreset} onPress={() => setAffectionDraft('10')}>
+                <Text style={styles.btnPresetText}>Lv.10</Text>
+              </TouchableOpacity>
+            </View>
+            <View style={styles.inputRow}>
+              <TextInput
+                style={styles.inputFlex}
+                value={affectionDraft}
+                onChangeText={setAffectionDraft}
+                placeholder="なつきLv.（1〜100）"
+                placeholderTextColor="rgba(255,255,255,0.4)"
+                keyboardType="number-pad"
+                returnKeyType="done"
+                blurOnSubmit
+                onSubmitEditing={applyAffection}
+              />
+              <TouchableOpacity style={styles.btnDone} onPress={applyAffection} activeOpacity={0.85}>
+                <Text style={styles.btnDoneText}>適用</Text>
+              </TouchableOpacity>
+            </View>
+            <TouchableOpacity
+              style={[styles.btn, styles.btnWide]}
+              onPress={() => {
+                onResetPetCount();
+                setOpen(false);
+              }}
+            >
+              <Text style={styles.btnText}>なでる回数をリセット</Text>
+            </TouchableOpacity>
+
+            <Text style={styles.section}>デイリーミッション</Text>
+            <Text style={styles.subHint}>お世話・なかよしミッションを、最初から確認できる状態に戻します。</Text>
+            <TouchableOpacity
+              style={[styles.btn, styles.btnWide]}
+              onPress={() => {
+                onResetDailyMissions();
+                setOpen(false);
+              }}
+            >
+              <Text style={styles.btnText}>今日のミッションをすべて未達成にする</Text>
+            </TouchableOpacity>
+
             <Text style={styles.section}>おなか・ヌメリ（通知・警告の確認用）</Text>
-            <Text style={styles.subHint}>0% / 残り1% を即反映して保存します</Text>
+            <Text style={styles.subHint}>0%に戻すと、その項目のミッション進行もやり直せます</Text>
             <View style={styles.row}>
               <TouchableOpacity
                 style={styles.btn}
@@ -319,7 +415,7 @@ function DebugOverlayInner({
 const styles = StyleSheet.create({
   fab: {
     position: 'absolute',
-    left: 62,
+    right: 62,
     top: Platform.OS === 'ios' ? 56 : 52,
     width: 44,
     height: 44,

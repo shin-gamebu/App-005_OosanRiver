@@ -26,7 +26,7 @@ jest.mock('expo-notifications', () => {
     AndroidImportance: { HIGH: 6, DEFAULT: 5 },
   };
 });
-import { healthyMessages } from './healthyMessages';
+import { tapMessageGroupForGrowthLevel } from './tapMessages';
 import {
   createInitialState,
   loadState,
@@ -58,13 +58,14 @@ describe('App コンポーネント', () => {
 
   test('初期レンダリングが正常に動作する', async () => {
     mockAsyncStorage.getItem.mockResolvedValue(null);
-    const { getByText } = render(<App />);
+    const { getByText, unmount } = render(<App />);
     
     await waitFor(() => {
-      const logElement = getByText(/川の底で静かに過ごしています|新しい住処を見つけました|今日も静かに過ごしています/);
+      const logElement = getByText(/サンショは/);
       expect(logElement).toBeTruthy();
     });
-  });
+    unmount();
+  }, 10000);
 
   test('dead状態のときオオサンショウウオが表示されない', async () => {
     const deadState: AppState = {
@@ -84,13 +85,14 @@ describe('App コンポーネント', () => {
     };
     
     mockAsyncStorage.getItem.mockResolvedValue(JSON.stringify(deadState));
-    const { queryByTestId } = render(<App />);
+    const { queryByTestId, unmount } = render(<App />);
     
     await waitFor(() => {
       // オオサンショウウオの画像が表示されないことを確認
       // 実際のテストでは、testIDを追加する必要があるかもしれません
       expect(queryByTestId('oosan-image')).toBeNull();
     });
+    unmount();
   });
 });
 
@@ -113,9 +115,11 @@ describe('ロジック関数のテスト', () => {
       expect(state.sizeFactor).toBe(1.0);
       expect(state.growthAnchorMs).toBeGreaterThanOrEqual(before);
       expect(state.growthAnchorMs).toBeLessThanOrEqual(after);
-      expect(state.bodyLengthCm).toBe(0);
-      expect(state.fullness).toBe(92);
-      expect(state.viscosity).toBe(92);
+      expect(state.bodyLengthCm).toBe(0.5);
+      expect(state.growthLevel).toBe(1);
+      expect(state.affection).toBe(0);
+      expect(state.fullness).toBe(1);
+      expect(state.viscosity).toBe(1);
       expect(state.condition).toBe('healthy');
       expect(state.latestLog).toBe('川の底で静かに過ごしています。');
       expect(state.claimedMilestoneIds).toEqual([]);
@@ -150,7 +154,12 @@ describe('ロジック関数のテスト', () => {
       mockAsyncStorage.getItem.mockResolvedValue(JSON.stringify(state));
       const loaded = await loadState();
       
-      expect(loaded).toEqual(state);
+      expect(loaded.startDate).toBe(state.startDate);
+      expect(loaded.latestLog).toBe(state.latestLog);
+      expect(loaded.bodyLengthCm).toBe(0.5);
+      expect(loaded.growthLevel).toBe(1);
+      expect(loaded.growthPoints).toBe(0);
+      expect(loaded.affection).toBe(0);
     });
 
     test('保存されていない場合は初期状態を返す', async () => {
@@ -303,14 +312,14 @@ describe('ロジック関数のテスト', () => {
       expect(result.lastVisitDate).toBe(today);
     });
 
-    test('3日放置でweakになる', () => {
+    test('14日放置でweakになる', () => {
       const today = new Date().toISOString().split('T')[0];
-      const threeDaysAgo = new Date(Date.now() - 3 * 86400000).toISOString().split('T')[0];
+      const fourteenDaysAgo = new Date(Date.now() - 14 * 86400000).toISOString().split('T')[0];
       
       const state: AppState = {
         startDate: '2024-01-01',
-        lastVisitDate: threeDaysAgo,
-        lastGrowthDate: threeDaysAgo,
+        lastVisitDate: fourteenDaysAgo,
+        lastGrowthDate: fourteenDaysAgo,
         sizeFactor: 1.0,
         growthAnchorMs: 0,
         bodyLengthCm: 0,
@@ -329,14 +338,14 @@ describe('ロジック関数のテスト', () => {
       expect(result.lastVisitDate).toBe(today);
     });
 
-    test('7日放置でdeadになる', () => {
+    test('30日放置でdeadになる', () => {
       const today = new Date().toISOString().split('T')[0];
-      const sevenDaysAgo = new Date(Date.now() - 7 * 86400000).toISOString().split('T')[0];
+      const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString().split('T')[0];
       
       const state: AppState = {
         startDate: '2024-01-01',
-        lastVisitDate: sevenDaysAgo,
-        lastGrowthDate: sevenDaysAgo,
+        lastVisitDate: thirtyDaysAgo,
+        lastGrowthDate: thirtyDaysAgo,
         sizeFactor: 1.0,
         growthAnchorMs: 0,
         bodyLengthCm: 0,
@@ -430,7 +439,7 @@ describe('ロジック関数のテスト', () => {
       expect(weakMessages).toContain(log);
     });
 
-    test('初日のとき適切なログを返す', () => {
+    test('初日も成長段階ごとの共通セリフを返す', () => {
       const today = new Date().toISOString().split('T')[0];
       const state: AppState = {
         startDate: today,
@@ -449,7 +458,7 @@ describe('ロジック関数のテスト', () => {
       };
       
       const log = generateDailyLog(state);
-      expect(log).toBe('新しい住処を見つけました。');
+      expect(tapMessageGroupForGrowthLevel(1).messages).toContain(log);
     });
 
     test('healthy状態のとき適切なログを返す', () => {
@@ -470,7 +479,7 @@ describe('ロジック関数のテスト', () => {
       };
 
       const log = generateDailyLog(state, daytimeHealthyAt);
-      expect(healthyMessages).toContain(log);
+      expect(tapMessageGroupForGrowthLevel(1).messages).toContain(log);
     });
   });
 });

@@ -3,6 +3,7 @@ import {
   StyleSheet,
   View,
   Text,
+  TextInput,
   Image,
   TouchableOpacity,
   Animated,
@@ -10,9 +11,9 @@ import {
   Platform,
   ScrollView,
   Easing,
-  Alert,
   AppState as RNAppState,
   Modal,
+  KeyboardAvoidingView,
   Pressable,
   type GestureResponderEvent,
 } from 'react-native';
@@ -29,6 +30,7 @@ import {
   generateDailyLog,
   formatOosanLengthCm,
   GROWTH_TARGET_CM,
+  DISPLAY_LENGTH_CAP_CM,
   ADULT_OOSAN_MIN_LENGTH_CM,
   GROWTH_CM_PER_SECOND,
   MS_TO_REACH_TARGET_LENGTH,
@@ -41,13 +43,42 @@ import {
   formatGrowthMultiplier,
   getGrowthPhaseLabel,
   fullnessBarColor,
+  viscosityBarColor,
   backgroundGaugeDecayMultiplier,
   DEFAULT_NIGHT_CARE_MULTIPLIER,
   DAYS_UNTIL_INACTIVITY_REMINDER,
+  applyCareAction,
+  claimDailyCareMissionReward,
+  claimDailyPetMissionReward,
+  resetDailyMissionsForDebug,
+  careGrowthPointsForGauge,
+  dailyCareGrowthPointCapForLevel,
+  affectionLevelForValue,
+  affectionHeartColorForLevel,
+  affectionEffectHeartCountForLevel,
+  affectionHeartCountForLevel,
+  affectionStageForLevel,
+  affectionProgressForValue,
+  AFFECTION_MODEL_VERSION,
+  DAILY_PET_BONUS_USES,
+  dailyPetNormalLimitForAffectionValue,
+  growthPointsRequiredForLevel,
+  GROWTH_STAGES,
+  claimGrowthMissionReward,
+  applyGrowthMissionBonusCare,
+  growthMissionIdForCm,
+  growthMissionRewardKindForCm,
+  growthMissionRewardForCm,
+  growthMissionDirectPointsForCm,
+  GrowthMissionRewardKind,
+  DEFAULT_OOSAN_NAME,
+  normalizeOosanName,
 } from './src/logic';
 import { DebugTimeProvider, useDebugTime } from './src/DebugTimeContext';
 import { DebugOverlay } from './src/DebugOverlay';
 import { LegalInfoModal } from './src/LegalInfoModal';
+import { GrowthGuideModal } from './src/GrowthGuideModal';
+import { pickTapMessage, pickOosanMessage, oosanMessageUsesName } from './src/tapMessages';
 import { ADULT_WALK_FRAMES } from './src/adultWalkFrames';
 import {
   applyOfflineCatchUp,
@@ -63,8 +94,7 @@ import {
   prepareCareGaugeNotifications,
   schedulePredictiveGaugeAlerts,
   clearPredictiveGaugeAlerts,
-  notifyFullnessEmptyNow,
-  notifyViscosityEmptyNow,
+  notifyCareEmptyNow,
   notifyInactivityReminderNow,
   notifyThirtyDayReminderNow,
 } from './src/careGaugeNotifications';
@@ -81,6 +111,33 @@ const DEBUG_FORCE_MAX_OOSAN_LENGTH = false;
  * 直したら必ず false に戻すこと。（100cm デバッグの残りデータを捨てたいとき用。他の日付ログ等はそのまま）
  */
 const DEBUG_RESET_GROWTH_PROGRESS_ONCE = false;
+
+const growthRewardLabel = (reward: GrowthMissionRewardKind, uses: number = 3): string => {
+  // 通常のお世話と区別できるよう、「ごほうび」は必ず残す。
+  if (reward === 'feed') return `ごほうびごはん×${uses}`;
+  if (reward === 'water') return `ごほうびおみず×${uses}`;
+  if (reward === 'both') return `ごほうびごはん・おみず 各${uses}回`;
+  return '報酬なし';
+};
+
+const growthRewardIcon = (reward: GrowthMissionRewardKind): keyof typeof Ionicons.glyphMap =>
+  reward === 'feed' ? 'restaurant' : reward === 'water' ? 'water' : reward === 'both' ? 'gift' : 'sparkles';
+
+
+type MissionRewardPopup = {
+  kind: 'care' | 'pet' | 'growth';
+  amount?: number;
+  directPoints?: number;
+  reward?: GrowthMissionRewardKind;
+};
+
+type QueuedCelebrationPopup =
+  | { kind: 'adult' }
+  | { kind: 'stage'; stage: { cm: number; name: string } }
+  | { kind: 'length'; data: { cm: number; bodyLengthCm: number } }
+  | { kind: 'affection'; data: { level: number; name: string } };
+/** セーブする元文言を壊さず、日々のひとことだけを名前入りで表示する。 */
+const namedOosanNarration = (name: string, text: string): string => `${name}は${text}`;
 
 /**
  * 開発用: true なら時刻に関係なく朝 UI（太陽・「朝」）を表示し、夜のベール・三日月は出さない。
@@ -100,26 +157,37 @@ const STORAGE_KEY = 'oosanRiverState';
 /**
  * 満腹（おなか）が平均して 1% 減るまでの目安秒数（毎秒の減りにジッターを掛ける）
  */
-const FULLNESS_SECONDS_PER_ONE_PERCENT = 15;
+const FULLNESS_SECONDS_PER_ONE_PERCENT = 432;
 
-/** ヌメリが平均して 1% 減るまでの目安秒数（logic.ts のバックグラウンド 12h/24h 設計と揃えること） */
-const VISCOSITY_SECONDS_PER_ONE_PERCENT = 30;
+/** ヌメリもおなかと同じく、100%→0% を平均12時間にそろえる。 */
+const VISCOSITY_SECONDS_PER_ONE_PERCENT = 432;
 
 const FULLNESS_DECAY_PER_SECOND = 1 / FULLNESS_SECONDS_PER_ONE_PERCENT;
 const VISCOSITY_DECAY_PER_SECOND = 1 / VISCOSITY_SECONDS_PER_ONE_PERCENT;
+/**
+ * 満タン直後の連打だけを防ぐための、ごく短い待機ライン。
+ * 99%ならすでに+1ptを得られる仕様なので、以前の「約4時間」基準は使わない。
+ */
+const CARE_POINT_UNLOCK_PERCENT = 99.5;
+
+const growthPointWaitLabel = (gaugePercent: number, secondsPerOnePercent: number): string => {
+  // ゲージの表示値と「受取OK」判定が食い違わないよう、区切りも表示と同じ整数にそろえる。
+  const displayedGauge = Math.round(gaugePercent);
+  const seconds = Math.max(0, displayedGauge - CARE_POINT_UNLOCK_PERCENT) * secondsPerOnePercent;
+  if (seconds <= 1) return '+1pt！';
+  const totalMinutes = Math.ceil(seconds / 60);
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  // 操作ボタン下の小さな枠でも、末尾の「+1pt」まで必ず読める長さにする。
+  return hours > 0 ? `あと${hours}時間で+1pt` : `あと${minutes}分で+1pt`;
+};
 
 /**
  * フォアグラウンド中のおなか・ヌメリ減少に掛ける倍率（基準は各 SECONDS_PER_ONE_PERCENT）。
- * 開いているときの目安: おなか 100→0 約 12.5 分、ヌメリ 約 25 分。
+ * 開いているときも閉じているときも、100→0 は平均約12時間。
+ * 連打で100%からわずかに減ることを防ぎ、ゆっくり育てられる速度にする。
  */
-const GAUGE_DECAY_MULT_FOREGROUND = 2;
-
-/**
- * バックグラウンド／アプリ非表示時の減少倍率（おなか・ヌメリ共通）。
- * 1/6 なら目安: おなか 100→0 約 2.5 時間、ヌメリ 約 5 時間（ジッター除く）。
- * もっとゆっくりにするなら 1/8 などに下げる。
- */
-const GAUGE_DECAY_MULT_BACKGROUND = 1 / 6;
+const GAUGE_DECAY_MULT_FOREGROUND = 1;
 
 /** 毎秒の減少量に掛ける乱数（平均 1.0、やや狭い幅） */
 const DECAY_JITTER_MIN = 0.9;
@@ -155,7 +223,7 @@ export const saveState = async (state: AppState): Promise<void> => {
   }
 };
 
-type PfxKind = 'feed' | 'water';
+type PfxKind = 'feed' | 'water' | 'bonusFeed' | 'bonusWater' | 'bonusPet';
 
 const ESA_FALL_IMG = require('./assets/images/esa.png');
 const MIZU_FALL_IMG = require('./assets/images/mizu.png');
@@ -220,11 +288,159 @@ const MainLengthCounter: React.FC<{ cmText: string; phase: string }> = ({ cmText
   );
 };
 
+/** 上部の丸いレベルゲージ。細かなセグメントで水色のチャージリングを表す。 */
+const LevelProgressOrb: React.FC<{
+  cmText: string;
+  bodyLengthCm: number;
+  points: number;
+  pointsNeeded: number;
+  onPress: () => void;
+  pointGain: { id: number; amount: number; source: 'feed' | 'water' | 'mission' } | null;
+}> = ({ cmText, bodyLengthCm, points, pointsNeeded, onPress, pointGain }) => {
+  const pulse = useRef(new Animated.Value(1)).current;
+  const gainProgress = useRef(new Animated.Value(0)).current;
+  const segmentCount = 40;
+  // 1cm以降は「整数cmから次の1cmまで」を1周として見せる。
+  const rangeStart = bodyLengthCm < 0.5 ? 0 : bodyLengthCm < 1 ? 0.5 : Math.floor(bodyLengthCm);
+  const rangeEnd = bodyLengthCm < 0.5
+      ? 0.5
+      : bodyLengthCm < 1
+        ? 1
+        : Math.floor(bodyLengthCm) + 1;
+  const rangeProgress = rangeEnd <= rangeStart
+    ? 1
+    : Math.max(0, Math.min(1, (bodyLengthCm - rangeStart) / (rangeEnd - rangeStart)));
+  const filledSegments = Math.min(segmentCount, Math.ceil(rangeProgress * segmentCount));
+
+  useEffect(() => {
+    if (!pointGain) return;
+    pulse.setValue(1);
+    gainProgress.setValue(0);
+    Animated.parallel([
+      Animated.sequence([
+        Animated.delay(580),
+        Animated.spring(pulse, { toValue: 1.13, friction: 5, useNativeDriver: true }),
+        Animated.spring(pulse, { toValue: 1, friction: 6, useNativeDriver: true }),
+      ]),
+      Animated.sequence([
+        Animated.delay(540),
+        Animated.timing(gainProgress, {
+          toValue: 1,
+          duration: 420,
+          easing: Easing.out(Easing.cubic),
+          useNativeDriver: true,
+        }),
+      ]),
+    ]).start();
+  }, [pointGain, pulse, gainProgress]);
+
+  return (
+    <Pressable
+      style={styles.levelOrbHitArea}
+      onPress={(event) => {
+        event.stopPropagation();
+        onPress();
+      }}
+      accessibilityRole="button"
+      accessibilityLabel="体長と次の1cmまでの進み具合を開く"
+    >
+      <Animated.View style={[styles.levelOrb, { transform: [{ scale: pulse }] }]}>
+        {pointGain && (
+          <Animated.View
+            key={pointGain.id}
+            pointerEvents="none"
+            style={[
+              styles.levelOrbChargeFlash,
+              {
+                opacity: gainProgress.interpolate({ inputRange: [0, 0.15, 0.65, 1], outputRange: [0, 0.9, 0.38, 0] }),
+                transform: [{ scale: gainProgress.interpolate({ inputRange: [0, 1], outputRange: [0.78, 1.28] }) }],
+              },
+            ]}
+          />
+        )}
+        {Array.from({ length: segmentCount }, (_, index) => {
+          const angle = (Math.PI * 2 * index) / segmentCount - Math.PI / 2;
+          const radius = 37;
+          return (
+            <View
+              key={index}
+              style={[
+                styles.levelOrbSegment,
+                {
+                  left: 41 + Math.cos(angle) * radius - 1.5,
+                  top: 41 + Math.sin(angle) * radius - 3.5,
+                  transform: [{ rotate: `${(index * 360) / segmentCount}deg` }],
+                  backgroundColor: index < filledSegments ? '#42b7e9' : 'rgba(35, 139, 189, 0.18)',
+                },
+              ]}
+            />
+          );
+        })}
+        <Text style={styles.levelOrbLabel}>体長</Text>
+        <Text style={styles.levelOrbValue} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.68}>
+          {cmText}
+        </Text>
+        <Text style={styles.levelOrbUnit}>cm</Text>
+        <Text style={styles.levelOrbPoints}>{pointsNeeded > 0 ? `${Number.isInteger(points) ? points : points.toFixed(1)} / ${pointsNeeded} pt` : 'MAX'}</Text>
+      </Animated.View>
+    </Pressable>
+  );
+};
+
+/** ごはん・おみずで得た成長ポイントが、体長リングへ吸い込まれる演出。 */
+const GrowthPointFlight: React.FC<{
+  gain: { id: number; amount: number; source: 'feed' | 'water' | 'mission' };
+  screenWidth: number;
+  screenHeight: number;
+}> = ({ gain, screenWidth, screenHeight }) => {
+  const progress = useRef(new Animated.Value(0)).current;
+  const startX = gain.source === 'feed' ? screenWidth * 0.19 : screenWidth * 0.5;
+  const startY = gain.source === 'mission' ? screenHeight * 0.3 : screenHeight - (Platform.OS === 'ios' ? 98 : 74);
+  const targetX = screenWidth * 0.5;
+  const targetY = Platform.OS === 'ios' ? 96 : 84;
+
+  useEffect(() => {
+    progress.setValue(0);
+    const animation = Animated.timing(progress, {
+      toValue: 1,
+      duration: 1600,
+      easing: Easing.inOut(Easing.cubic),
+      useNativeDriver: true,
+    });
+    animation.start();
+    return () => animation.stop();
+  }, [gain.id, progress]);
+
+  return (
+    <Animated.View
+      pointerEvents="none"
+      style={[
+        styles.growthPointFlight,
+        {
+          left: startX - 43,
+          top: startY,
+          opacity: progress.interpolate({ inputRange: [0, 0.06, 0.82, 1], outputRange: [0, 1, 1, 0] }),
+          transform: [
+            { translateX: progress.interpolate({ inputRange: [0, 1], outputRange: [0, targetX - startX] }) },
+            { translateY: progress.interpolate({ inputRange: [0, 1], outputRange: [0, targetY - startY] }) },
+            { scale: progress.interpolate({ inputRange: [0, 0.1, 0.8, 1], outputRange: [0.75, 1.08, 0.8, 0.45] }) },
+          ],
+        },
+      ]}
+    >
+      <Text style={styles.growthPointFlightText}>体長 +{gain.amount}pt</Text>
+    </Animated.View>
+  );
+};
+
 const FallingImageParticle: React.FC<{ p: FallingPfx; fallDistance: number }> = ({
   p,
   fallDistance,
 }) => {
   const t = useRef(new Animated.Value(0)).current;
+  const isBonusFeed = p.kind === 'bonusFeed';
+  const isBonusWater = p.kind === 'bonusWater';
+  const isBonusPet = p.kind === 'bonusPet';
   const src = p.kind === 'feed' ? ESA_FALL_IMG : MIZU_FALL_IMG;
   useEffect(() => {
     Animated.timing(t, {
@@ -261,7 +477,21 @@ const FallingImageParticle: React.FC<{ p: FallingPfx; fallDistance: number }> = 
         transform: [{ translateX }, { translateY }, { rotate }],
       }}
     >
-      <Image source={src} style={{ width: p.size, height: p.size }} resizeMode="contain" />
+      {isBonusFeed ? (
+        <Text style={{ fontSize: p.size * 0.7 }}>{['🦀', '🦐', '🐟'][p.id % 3]}</Text>
+      ) : isBonusWater ? (
+        <View style={styles.bonusWaterParticle}>
+          <Ionicons name="water" size={p.size * 0.7} color="#55c9f1" />
+          <Text style={styles.bonusWaterSparkle}>✦</Text>
+        </View>
+      ) : isBonusPet ? (
+        <View style={styles.bonusPetParticle}>
+          <Text style={[styles.bonusPetFallingHeart, { fontSize: p.size * 0.8 }]}>♥</Text>
+          <Text style={styles.bonusPetFallingSparkle}>✦</Text>
+        </View>
+      ) : (
+        <Image source={src} style={{ width: p.size, height: p.size }} resizeMode="contain" />
+      )}
     </Animated.View>
   );
 };
@@ -271,7 +501,12 @@ const FloatingPetHeart: React.FC<{
   delay: number;
   horizontalOffset: number;
   size: number;
-}> = ({ delay, horizontalOffset, size }) => {
+  durationMs: number;
+  color: string;
+  symbol?: string;
+  slowGrow?: boolean;
+  peakScale?: number;
+}> = ({ delay, horizontalOffset, size, durationMs, color, symbol = '♥', slowGrow = false, peakScale = 1.1 }) => {
   const progress = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
@@ -279,42 +514,118 @@ const FloatingPetHeart: React.FC<{
       Animated.delay(delay),
       Animated.timing(progress, {
         toValue: 1,
-        duration: 720,
+        duration: durationMs,
         easing: Easing.out(Easing.cubic),
         useNativeDriver: true,
       }),
     ]);
     animation.start();
     return () => animation.stop();
-  }, [delay, progress]);
+  }, [delay, durationMs, progress]);
 
   const travel = Math.max(42, size * 0.32);
+  const heartScale = slowGrow
+    ? progress.interpolate({ inputRange: [0, 0.82, 1], outputRange: [0.42, peakScale, peakScale * 1.08] })
+    : progress.interpolate({ inputRange: [0, 0.2, 1], outputRange: [0.55, 1.1, 0.9] });
   return (
     <Animated.Text
       style={[
         styles.petHeart,
+        { color },
         {
           left: size * 0.5 + horizontalOffset,
           opacity: progress.interpolate({ inputRange: [0, 0.1, 0.75, 1], outputRange: [0, 1, 1, 0] }),
           transform: [
             { translateY: progress.interpolate({ inputRange: [0, 1], outputRange: [0, -travel] }) },
-            { scale: progress.interpolate({ inputRange: [0, 0.2, 1], outputRange: [0.55, 1.1, 0.9] }) },
+            { scale: heartScale },
           ],
         },
       ]}
     >
-      ♥
+      {symbol}
     </Animated.Text>
   );
 };
 
-const PetHeartBurst: React.FC<{ size: number }> = ({ size }) => (
-  <View pointerEvents="none" style={[styles.petHeartLayer, { width: size, height: size * 0.8, marginLeft: -size / 2 }]}>
-    <FloatingPetHeart delay={0} horizontalOffset={-size * 0.18} size={size} />
-    <FloatingPetHeart delay={90} horizontalOffset={0} size={size} />
-    <FloatingPetHeart delay={170} horizontalOffset={size * 0.18} size={size} />
-  </View>
-);
+const PetHeartBurst: React.FC<{
+  size: number;
+  heartCount: number;
+  color: string;
+  startDelay?: number;
+  symbol?: string;
+  durationMsOverride?: number;
+  slowGrow?: boolean;
+  peakScale?: number;
+}> = ({
+  size,
+  heartCount,
+  color,
+  startDelay = 0,
+  symbol = '♥',
+  durationMsOverride,
+  slowGrow = false,
+  peakScale,
+}) => {
+  const count = Math.max(1, Math.min(10, heartCount));
+  const durationMs = durationMsOverride ?? (count === 1 ? 1400 : count <= 3 ? 1050 : 720);
+  return (
+    <View pointerEvents="none" style={[styles.petHeartLayer, { width: size, height: size * 0.8, marginLeft: -size / 2 }]}>
+      {Array.from({ length: count }, (_, index) => {
+        const progress = count === 1 ? 0.5 : index / (count - 1);
+        return (
+          <FloatingPetHeart
+            key={index}
+            delay={startDelay + index * 75}
+            horizontalOffset={(progress - 0.5) * size * 0.7}
+            size={size}
+            durationMs={durationMs}
+            color={color}
+            symbol={symbol}
+            slowGrow={slowGrow}
+            peakScale={peakScale}
+          />
+        );
+      })}
+    </View>
+  );
+};
+
+/** 1の位はハート数、10の位は色と「+20」表記で表す。 */
+const AffectionLevelHearts: React.FC<{ level: number }> = ({ level }) => {
+  const safeLevel = Math.max(1, Math.min(100, Math.floor(level)));
+  const heartCount = affectionHeartCountForLevel(safeLevel);
+  const completedTens = Math.floor(safeLevel / 10) * 10;
+  const color = affectionHeartColorForLevel(safeLevel);
+  return (
+    <View style={styles.affectionHeartsRow} accessibilityLabel={`なつきLv.${safeLevel} / 100`}>
+      {completedTens > 0 && (
+        <View style={styles.affectionHeartCarry}>
+          <Text style={[styles.affectionHeartCarryText, { color }]}>+{completedTens}</Text>
+        </View>
+      )}
+      <Text style={[styles.affectionHeartSet, { color }]}>{'♥'.repeat(heartCount)}{'♡'.repeat(10 - heartCount)}</Text>
+    </View>
+  );
+};
+
+/** なつきゲージが満タンになった瞬間だけ、満ちる動きを強調する。 */
+const AffectionGaugeFullEffect: React.FC<{ color: string }> = ({ color }) => {
+  const fill = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    const animation = Animated.timing(fill, { toValue: 1, duration: 420, easing: Easing.out(Easing.cubic), useNativeDriver: false });
+    animation.start();
+    return () => animation.stop();
+  }, [fill]);
+  return (
+    <Animated.View
+      pointerEvents="none"
+      style={[
+        styles.affectionGaugeFullEffect,
+        { backgroundColor: color, width: fill.interpolate({ inputRange: [0, 1], outputRange: ['0%', '100%'] }) },
+      ]}
+    />
+  );
+};
 
 async function runConfettiBurst(): Promise<void> {
   if (Platform.OS !== 'web') return;
@@ -363,7 +674,7 @@ const TapWaterRipple: React.FC<{
         Animated.parallel([
           Animated.timing(scale2, {
             toValue: 2.95,
-            duration: 920,
+      duration: 1400,
             easing: outC,
             useNativeDriver: native,
           }),
@@ -436,7 +747,7 @@ const SparkleOverlay: React.FC<{ onDone: () => void }> = ({ onDone }) => {
   return (
     <Animated.View
       pointerEvents="none"
-      style={[StyleSheet.absoluteFillObject, styles.sparkleLayer, { opacity: op, zIndex: 200 }]}
+      style={[StyleSheet.absoluteFill, styles.sparkleLayer, { opacity: op, zIndex: 200 }]}
     >
       {glyphs.map((c, i) => (
         <Text
@@ -463,6 +774,8 @@ const AppMain: React.FC = () => {
 
   const [state, setState] = useState<AppState | null>(null);
   const [isPetting, setIsPetting] = useState(false);
+  const [isBonusPetting, setIsBonusPetting] = useState(false);
+  const [isOosanDragging, setIsOosanDragging] = useState(false);
   const [imagesLoaded, setImagesLoaded] = useState(Platform.OS === 'web');
   const [isMovingRight, setIsMovingRight] = useState(false); // オオサンショウウオが右に動いているかどうか
   const [isOosanWalking, setIsOosanWalking] = useState(false);
@@ -475,7 +788,6 @@ const AppMain: React.FC = () => {
   const oosanYAnim = React.useRef(new Animated.Value(0)).current;
   const oosanLayoutSizeRef = useRef(48);
   const oosanLengthCmRef = useRef(0);
-  const [, setGrowthTick] = useState(0);
   const [particles, setParticles] = useState<FallingPfx[]>([]);
   const particleSerial = useRef(0);
   const nightDim = useRef(new Animated.Value(computeIsNight() ? 1 : 0)).current;
@@ -492,8 +804,6 @@ const AppMain: React.FC = () => {
   const skipNextMilestoneDiffRef = useRef(false);
   const stateRef = useRef<AppState | null>(null);
   const appStateSubRef = useRef(RNAppState.currentState);
-  const prevFullnessNotifyRef = useRef<number | null>(null);
-  const prevViscosityNotifyRef = useRef<number | null>(null);
   /** タップ移動と自動うろうろの競合を避ける（値が変わったら進行中の遅延チェーンは捨てる） */
   const wanderGenRef = useRef(0);
   const moveOosanRef = useRef<(() => void) | null>(null);
@@ -501,35 +811,135 @@ const AppMain: React.FC = () => {
   const tapRippleSerial = useRef(0);
   /** タップ座標を子 View の location ではなく Pressable 全体に対して取る */
   const mainPressableRef = useRef<View | null>(null);
+  /** オオサンショウウオを指で動かしている間の開始位置。 */
+  const oosanDragRef = useRef<{ pageX: number; pageY: number; x: number; y: number; moved: boolean; generation: number } | null>(null);
+  const consumeOosanTouchRef = useRef(false);
   const [legalInfoOpen, setLegalInfoOpen] = useState(false);
+  const [careWarningOpen, setCareWarningOpen] = useState<{ kind: 'feed' | 'water'; isEmpty: boolean } | null>(null);
+  const [careTimingInfoOpen, setCareTimingInfoOpen] = useState(false);
+  const [restartConfirmOpen, setRestartConfirmOpen] = useState(false);
+  const [newOosanGuideOpen, setNewOosanGuideOpen] = useState(false);
+  // 初回の名前決定後だけ、ごはん・おみずの場所を金色のごほうび風に案内する。
+  const [initialCareGuide, setInitialCareGuide] = useState({ feed: false, water: false });
+  const [nameEditorOpen, setNameEditorOpen] = useState(false);
+  const [nameDraft, setNameDraft] = useState(DEFAULT_OOSAN_NAME);
+  const [missionOpen, setMissionOpen] = useState(false);
+  const [dailyMissionRewardPopup, setDailyMissionRewardPopup] = useState<MissionRewardPopup | null>(null);
+  /** ミッション一覧がフェードアウトしてから報酬を出すための待機状態。 */
+  const [pendingMissionRewardPopup, setPendingMissionRewardPopup] = useState<MissionRewardPopup | null>(null);
+  const [queuedCelebrationPopups, setQueuedCelebrationPopups] = useState<QueuedCelebrationPopup[]>([]);
+  const [growthGuideOpen, setGrowthGuideOpen] = useState(false);
+  const [adultEvolutionOpen, setAdultEvolutionOpen] = useState(false);
+  const [growthLengthUp, setGrowthLengthUp] = useState<{ cm: number; bodyLengthCm: number } | null>(null);
+  const [affectionLevelUp, setAffectionLevelUp] = useState<{ level: number; name: string } | null>(null);
+  const [affectionGaugeCelebration, setAffectionGaugeCelebration] = useState<{ level: number; name: string } | null>(null);
+  const [growthStageNotice, setGrowthStageNotice] = useState<{ cm: number; name: string } | null>(null);
+  const [growthPointGain, setGrowthPointGain] = useState<{ id: number; amount: number; source: 'feed' | 'water' | 'mission' } | null>(null);
+  const growthPointGainSerial = useRef(0);
+  const pendingGrowthPointGainRef = useRef<{ amount: number; source: 'feed' | 'water' | 'mission' } | null>(null);
+  const previousBodyLengthRef = useRef<number | null>(null);
+  const previousAffectionLevelRef = useRef<number | null>(null);
+  const affectionGaugeCelebrationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [careSpeech, setCareSpeech] = useState<string | null>(null);
+  const careSpeechTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const removeTapRipple = useCallback((id: number) => {
     setTapRipples((list) => list.filter((t) => t.id !== id));
   }, []);
 
+  const showCareSpeech = useCallback((message: string) => {
+    if (careSpeechTimerRef.current) clearTimeout(careSpeechTimerRef.current);
+    setCareSpeech(message);
+    careSpeechTimerRef.current = setTimeout(() => {
+      setCareSpeech(null);
+      careSpeechTimerRef.current = null;
+    }, 2600);
+  }, []);
+
+  const showCareGaugeWarning = useCallback((kind: 'feed' | 'water', isEmpty: boolean) => {
+    setCareWarningOpen({ kind, isEmpty });
+  }, []);
+
+  const hasActiveCelebrationPopup =
+    adultEvolutionOpen || growthStageNotice != null || growthLengthUp != null || affectionLevelUp != null;
+
+  const showCelebrationPopup = useCallback((popup: QueuedCelebrationPopup) => {
+    if (popup.kind === 'adult') setAdultEvolutionOpen(true);
+    if (popup.kind === 'stage') setGrowthStageNotice(popup.stage);
+    if (popup.kind === 'length') setGrowthLengthUp(popup.data);
+    if (popup.kind === 'affection') setAffectionLevelUp(popup.data);
+  }, []);
+
+  /** 報酬・成長演出の全画面モーダルを決して重ねない。 */
+  const queueCelebrationPopup = useCallback((popup: QueuedCelebrationPopup) => {
+    if (missionOpen || dailyMissionRewardPopup != null || pendingMissionRewardPopup != null || hasActiveCelebrationPopup) {
+      setQueuedCelebrationPopups((queue) => [...queue, popup]);
+      return;
+    }
+    showCelebrationPopup(popup);
+  }, [dailyMissionRewardPopup, hasActiveCelebrationPopup, missionOpen, pendingMissionRewardPopup, showCelebrationPopup]);
+
+  const showGrowthStageNotice = useCallback((stage: { cm: number; name: string }) => {
+    queueCelebrationPopup({ kind: 'stage', stage });
+  }, [queueCelebrationPopup]);
+
+  const openNameEditor = useCallback(() => {
+    setNameDraft(state?.oosanName ?? DEFAULT_OOSAN_NAME);
+    setNameEditorOpen(true);
+  }, [state?.oosanName]);
+
+  const closeNewOosanGuide = useCallback(() => {
+    setNewOosanGuideOpen(false);
+  }, []);
+
+  const saveOosanName = useCallback(() => {
+    const oosanName = normalizeOosanName(nameDraft);
+    setState((s) => {
+      if (!s) return s;
+      const next = { ...s, oosanName };
+      void saveState(next);
+      return next;
+    });
+    setNameDraft(oosanName);
+    setNameEditorOpen(false);
+  }, [nameDraft]);
+
+  /** 初回案内では、名前と「お世話を始める」を一度の決定で完了させる。 */
+  const beginLifeWithOosan = useCallback(() => {
+    const oosanName = normalizeOosanName(nameDraft);
+    setState((s) => {
+      if (!s) return s;
+      const next = { ...s, oosanName };
+      void saveState(next);
+      return next;
+    });
+    setNameDraft(oosanName);
+    setNewOosanGuideOpen(false);
+    setInitialCareGuide({ feed: true, water: true });
+  }, [nameDraft]);
+
+  useEffect(() => () => {
+    if (careSpeechTimerRef.current) clearTimeout(careSpeechTimerRef.current);
+    if (affectionGaugeCelebrationTimerRef.current) clearTimeout(affectionGaugeCelebrationTimerRef.current);
+  }, []);
+
   /** 死亡状態から、保存済みの育成データを初期状態へ戻して再開する。 */
   const restartWithNewOosan = useCallback(() => {
-    Alert.alert(
-      '新しく始めますか？',
-      'これまでの体長・おなか・ヌメリ・成長の状態は初期化されます。',
-      [
-        { text: '今は閉じる', style: 'cancel' },
-        {
-          text: '始める',
-          onPress: () => {
-            const initialState = createInitialState();
-            setParticles([]);
-            setTapRipples([]);
-            setCelebrationQueue([]);
-            setCelebrationItem(null);
-            setOfflineBacklogPageQueue([]);
-            offlineBacklogModalMetaRef.current = null;
-            void clearPredictiveGaugeAlerts();
-            setState(initialState);
-            void saveState(initialState);
-          },
-        },
-      ]
-    );
+    setRestartConfirmOpen(true);
+  }, []);
+
+  const confirmRestartWithNewOosan = useCallback(() => {
+    const initialState = createInitialState();
+    setParticles([]);
+    setTapRipples([]);
+    setCelebrationQueue([]);
+    setCelebrationItem(null);
+    setOfflineBacklogPageQueue([]);
+    offlineBacklogModalMetaRef.current = null;
+    void clearPredictiveGaugeAlerts();
+    setRestartConfirmOpen(false);
+    setState(initialState);
+    void saveState(initialState);
+    setNewOosanGuideOpen(true);
   }, []);
 
   const commitClaimMilestone = useCallback(
@@ -574,6 +984,7 @@ const AppMain: React.FC = () => {
       void saveState(n);
       return n;
     });
+    setNewOosanGuideOpen(true);
   }, [bannerAnim]);
 
   const applyDebugGauges = useCallback(
@@ -583,10 +994,17 @@ const AppMain: React.FC = () => {
         const n = {
           ...s,
           ...(patch.fullness !== undefined
-            ? { fullness: Math.max(0, Math.min(100, patch.fullness)) }
+            ? {
+                fullness: Math.max(0, Math.min(100, patch.fullness)),
+                // デバッグで空に戻した場合は、その項目のミッション進行もやり直せるようにする。
+                ...(patch.fullness <= 0 ? { dailyFeedMissionComplete: false, dailyCareBonusAwarded: false, feedGrowthPointsToday: 0 } : {}),
+              }
             : {}),
           ...(patch.viscosity !== undefined
-            ? { viscosity: Math.max(0, Math.min(100, patch.viscosity)) }
+            ? {
+                viscosity: Math.max(0, Math.min(100, patch.viscosity)),
+                ...(patch.viscosity <= 0 ? { dailyWaterMissionComplete: false, dailyCareBonusAwarded: false, waterGrowthPointsToday: 0 } : {}),
+              }
             : {}),
         };
         void saveState(n);
@@ -595,6 +1013,90 @@ const AppMain: React.FC = () => {
     },
     []
   );
+
+  const applyDebugAffection = useCallback((value: number) => {
+    setState((s) => {
+      if (!s || s.condition === 'dead') return s;
+      const n = { ...s, affection: Math.max(0, Math.floor(value)), affectionModelVersion: AFFECTION_MODEL_VERSION };
+      void saveState(n);
+      return n;
+    });
+  }, []);
+
+  /** 開発用: なつき度は変えずに、その日の「なでる」回数だけを戻す。 */
+  const resetDebugPetCount = useCallback(() => {
+    setState((s) => {
+      if (!s || s.condition === 'dead') return s;
+      const n = {
+        ...s,
+        petNormalCountToday: 0,
+        petCountToday: 0,
+        dailyPetMissionComplete: false,
+        dailyPetBonusClaimed: false,
+        dailyPetBonusUsesRemaining: 0,
+        dailyPetBonusUsed: false,
+      };
+      void saveState(n);
+      return n;
+    });
+  }, []);
+
+  const resetDebugDailyMissions = useCallback(() => {
+    setState((s) => {
+      if (!s || s.condition === 'dead') return s;
+      const n = resetDailyMissionsForDebug(s, getNow());
+      void saveState(n);
+      return n;
+    });
+  }, [getNow]);
+
+  const claimDailyMissionReward = useCallback(() => {
+    if (!state || state.condition === 'dead') return;
+    const preview = claimDailyCareMissionReward(state, getNow());
+    if (!preview.claimed) return;
+    setState((s) => {
+      if (!s || s.condition === 'dead') return s;
+      const claim = claimDailyCareMissionReward(s, getNow());
+      if (!claim.claimed) return s;
+      pendingGrowthPointGainRef.current = { amount: 1, source: 'mission' };
+      void saveState(claim.state);
+      return claim.state;
+    });
+    setMissionOpen(false);
+    setPendingMissionRewardPopup({ kind: 'care' });
+  }, [state, getNow]);
+
+  const claimDailyPetMission = useCallback(() => {
+    if (!state || state.condition === 'dead') return;
+    const preview = claimDailyPetMissionReward(state, getNow());
+    if (!preview.claimed) return;
+    setState((s) => {
+      if (!s || s.condition === 'dead') return s;
+      const claim = claimDailyPetMissionReward(s, getNow());
+      if (!claim.claimed) return s;
+      void saveState(claim.state);
+      return claim.state;
+    });
+    setMissionOpen(false);
+    setPendingMissionRewardPopup({ kind: 'pet' });
+  }, [state, getNow]);
+
+  const claimGrowthMission = useCallback((cm: number) => {
+    if (!state || state.condition === 'dead') return;
+    const preview = claimGrowthMissionReward(state, cm);
+    if (!preview.claimed) return;
+    setState((s) => {
+      if (!s || s.condition === 'dead') return s;
+      const claim = claimGrowthMissionReward(s, cm);
+      if (!claim.claimed) return s;
+      pendingGrowthPointGainRef.current = claim.directPoints > 0 ? { amount: claim.directPoints, source: 'mission' } : null;
+      void saveState(claim.state);
+      return claim.state;
+    });
+    setMissionOpen(false);
+    // 種類と報酬量を同時にセットし、既定の「お世話」文言が一瞬出ないようにする。
+    setPendingMissionRewardPopup({ kind: 'growth', amount: preview.amount, directPoints: preview.directPoints, reward: preview.reward });
+  }, [state]);
 
   /** 開発用: 死亡画面と再スタート導線をすぐ確認できるようにする。 */
   const applyDebugDeadState = useCallback(() => {
@@ -618,22 +1120,25 @@ const AppMain: React.FC = () => {
   }, []);
 
   const spawnBurst = useCallback((kind: PfxKind) => {
-    const count = 3;
+    const isBonus = kind === 'bonusFeed' || kind === 'bonusWater' || kind === 'bonusPet';
+    const count = isBonus ? 4 : 3;
     const batch: FallingPfx[] = [];
     for (let i = 0; i < count; i++) {
-      const base = kind === 'feed' ? 32 : 26;
+      const base = kind === 'feed' || kind === 'bonusFeed' || kind === 'bonusPet' ? 38 : 40;
       const size = base + Math.floor(Math.random() * 20);
-      const isWater = kind === 'water';
+      const isWater = kind === 'water' || kind === 'bonusWater';
       batch.push({
         id: ++particleSerial.current,
         kind,
         leftPct: 6 + Math.random() * 88,
         size,
-        drift: (Math.random() - 0.5) * (isWater ? 14 : 56),
+        drift: (Math.random() - 0.5) * (isWater ? 14 : kind === 'bonusPet' ? 34 : 56),
         delayMs: Math.floor(Math.random() * 500),
-        durationMs: 4200 + Math.floor(Math.random() * 1800),
-        spinFromDeg: (Math.random() - 0.5) * (isWater ? 6 : 22),
-        spinToDeg: isWater ? 25 + Math.random() * 35 : 100 + Math.random() * 120,
+        durationMs: isWater
+          ? 6500 + Math.floor(Math.random() * 2000)
+          : isBonus ? 5200 + Math.floor(Math.random() * 1800) : 4200 + Math.floor(Math.random() * 1800),
+        spinFromDeg: (Math.random() - 0.5) * (isWater ? 6 : kind === 'bonusPet' ? 12 : 22),
+        spinToDeg: isWater ? 25 + Math.random() * 35 : kind === 'bonusPet' ? 30 + Math.random() * 55 : 100 + Math.random() * 120,
       });
     }
     const ids = batch.map((b) => b.id);
@@ -645,24 +1150,92 @@ const AppMain: React.FC = () => {
   }, []);
 
   const onFeed = useCallback(() => {
+    if (!state || state.condition === 'dead') return;
+    setInitialCareGuide((guide) => guide.feed ? { ...guide, feed: false } : guide);
+    if ((state.bonusFeedCare ?? 0) > 0) {
+      spawnBurst('bonusFeed');
+      setState((s) => {
+        if (!s || s.condition === 'dead') return s;
+        const bonus = applyGrowthMissionBonusCare(s, 'feed');
+        if (!bonus.used) return s;
+        pendingGrowthPointGainRef.current = { amount: 1, source: 'feed' };
+        void saveState(bonus.state);
+        return bonus.state;
+      });
+      showCareSpeech('ごほうびごはん、おいしいね！ 体長 +1pt');
+      return;
+    }
+    // 満タンでも、かわいがった反応としてごはんの演出は見せる。
     spawnBurst('feed');
+    // 満タン時だけは演出のみ。90〜99%なら、ptなしで満タンまで回復できる。
+    if (state.fullness >= 99.5) {
+      showCareSpeech(Math.random() < 0.5 ? 'いまはおなかいっぱい〜' : 'もう少しおなかがすいたら食べようね');
+      return;
+    }
+    const preview = applyCareAction(state, 'feed', getNow());
+    if (
+      preview.state.dailyFeedMissionComplete &&
+      preview.state.dailyWaterMissionComplete &&
+      !(state.dailyFeedMissionComplete && state.dailyWaterMissionComplete)
+    ) {
+      showCareSpeech('お世話ミッション達成！ ミッションで報酬を受け取ってね');
+    }
     setState((s) => {
       if (!s || s.condition === 'dead') return s;
-      const n = { ...s, fullness: Math.min(100, s.fullness + 28) };
-      void saveState(n);
-      return n;
+      const care = applyCareAction(s, 'feed', getNow());
+      const growthPointAmount = care.growthPointsEarned + (care.dailyBonusEarned ? 1 : 0);
+      pendingGrowthPointGainRef.current =
+        growthPointAmount > 0
+          ? { amount: growthPointAmount, source: care.dailyBonusEarned ? 'mission' : 'feed' }
+          : null;
+      void saveState(care.state);
+      return care.state;
     });
-  }, [spawnBurst]);
+  }, [state, showCareSpeech, spawnBurst, getNow]);
 
   const onWater = useCallback(() => {
+    if (!state || state.condition === 'dead') return;
+    setInitialCareGuide((guide) => guide.water ? { ...guide, water: false } : guide);
+    if ((state.bonusWaterCare ?? 0) > 0) {
+      spawnBurst('bonusWater');
+      setState((s) => {
+        if (!s || s.condition === 'dead') return s;
+        const bonus = applyGrowthMissionBonusCare(s, 'water');
+        if (!bonus.used) return s;
+        pendingGrowthPointGainRef.current = { amount: 1, source: 'water' };
+        void saveState(bonus.state);
+        return bonus.state;
+      });
+      showCareSpeech('きらきら湧き水だ！ 体長 +1pt');
+      return;
+    }
+    // 満タンでも、かわいがった反応としておみずの演出は見せる。
     spawnBurst('water');
+    // 満タン時だけは演出のみ。90〜99%なら、ptなしで満タンまで回復できる。
+    if (state.viscosity >= 99.5) {
+      showCareSpeech(Math.random() < 0.5 ? 'いまはぬめぬめ、ばっちり！' : 'もう少し乾いたらおみずをもらおうね');
+      return;
+    }
+    const preview = applyCareAction(state, 'water', getNow());
+    if (
+      preview.state.dailyFeedMissionComplete &&
+      preview.state.dailyWaterMissionComplete &&
+      !(state.dailyFeedMissionComplete && state.dailyWaterMissionComplete)
+    ) {
+      showCareSpeech('お世話ミッション達成！ ミッションで報酬を受け取ってね');
+    }
     setState((s) => {
       if (!s || s.condition === 'dead') return s;
-      const n = { ...s, viscosity: Math.min(100, s.viscosity + 28) };
-      void saveState(n);
-      return n;
+      const care = applyCareAction(s, 'water', getNow());
+      const growthPointAmount = care.growthPointsEarned + (care.dailyBonusEarned ? 1 : 0);
+      pendingGrowthPointGainRef.current =
+        growthPointAmount > 0
+          ? { amount: growthPointAmount, source: care.dailyBonusEarned ? 'mission' : 'water' }
+          : null;
+      void saveState(care.state);
+      return care.state;
     });
-  }, [spawnBurst]);
+  }, [state, showCareSpeech, spawnBurst, getNow]);
 
   // 画像とGIFをプリロード
   useEffect(() => {
@@ -699,6 +1272,7 @@ const AppMain: React.FC = () => {
   // 初回マウント時に状態を読み込む
   useEffect(() => {
     const initializeState = async () => {
+      const hadSavedState = (await AsyncStorage.getItem(STORAGE_KEY)) != null;
       let loadedState = await loadState();
       if (DEBUG_FORCE_MAX_OOSAN_LENGTH) {
         loadedState = {
@@ -720,8 +1294,6 @@ const AppMain: React.FC = () => {
       const now = Date.now();
       const today = new Date().toISOString().split('T')[0];
       const daysSinceLastVisit = getDaysDiff(loadedState.lastVisitDate, today);
-      const fullnessBeforeOffline = loadedState.fullness;
-      const viscosityBeforeOffline = loadedState.viscosity;
       let updatedState = loadedState;
       if (!DEBUG_FORCE_MAX_OOSAN_LENGTH) {
         updatedState = applyOfflineCatchUp(
@@ -733,19 +1305,8 @@ const AppMain: React.FC = () => {
       } else {
         updatedState = { ...updatedState, lastGrowthTickMs: now };
       }
-      const backlog = findBackloggedMilestones(updatedState, now);
-      if (backlog.length > 0) {
-        const pages = paginateOfflineBacklog(backlog);
-        offlineBacklogModalMetaRef.current = {
-          total: backlog.length,
-          pageCount: pages.length,
-        };
-        setOfflineBacklogPageQueue(pages);
-        skipNextMilestoneDiffRef.current = true;
-      }
       // 状態を更新
       updatedState = processCondition(updatedState);
-      updatedState = processGrowth(updatedState);
       
       // 日次ログを生成
       const newLog =
@@ -756,17 +1317,9 @@ const AppMain: React.FC = () => {
         updatedState.latestLog = newLog;
       }
 
-      if (updatedState.condition !== 'dead') {
-        if (fullnessBeforeOffline > 0 && updatedState.fullness <= 0) {
-          void notifyFullnessEmptyNow();
-        }
-        if (viscosityBeforeOffline > 0 && updatedState.viscosity <= 0) {
-          void notifyViscosityEmptyNow();
-        }
-      }
-
       setState(updatedState);
       await saveState(updatedState);
+      if (!hadSavedState) setNewOosanGuideOpen(true);
     };
 
     initializeState();
@@ -775,6 +1328,77 @@ const AppMain: React.FC = () => {
   useEffect(() => {
     stateRef.current = state;
   }, [state]);
+
+  // 20cmをまたいだその場だけ、成体になったことを大きく祝う。
+  // 初回読込時は基準値だけ覚えるため、既存の成体セーブで突然出ることはない。
+  useEffect(() => {
+    if (!state) return;
+    const current = state.bodyLengthCm;
+    const previous = previousBodyLengthRef.current;
+    previousBodyLengthRef.current = current;
+    if (previous == null || state.condition === 'dead') return;
+    if (previous < ADULT_OOSAN_MIN_LENGTH_CM && current >= ADULT_OOSAN_MIN_LENGTH_CM) {
+      queueCelebrationPopup({ kind: 'adult' });
+      return;
+    }
+    const crossed = GROWTH_STAGES.filter(
+      (stage) => stage.cm !== ADULT_OOSAN_MIN_LENGTH_CM && previous < stage.cm && current >= stage.cm
+    );
+    const newest = crossed[crossed.length - 1];
+    if (newest) {
+      showGrowthStageNotice(newest);
+      return;
+    }
+    // 成長表の節目でなくても、整数cmをまたいだら通常の成長ポップアップを出す。
+    const previousWholeCm = Math.floor(previous);
+    const currentWholeCm = Math.floor(current);
+    if (currentWholeCm >= 1 && currentWholeCm > previousWholeCm) {
+      queueCelebrationPopup({ kind: 'length', data: { cm: currentWholeCm, bodyLengthCm: current } });
+    }
+  }, [state?.bodyLengthCm, state?.condition, queueCelebrationPopup, showGrowthStageNotice]);
+
+  // ゲージ満タンの演出を見せてから、すべてのなつきLvアップをお祝いする。
+  useEffect(() => {
+    if (!state) return;
+    const currentLevel = affectionLevelForValue(state.affection ?? 0);
+    const previousLevel = previousAffectionLevelRef.current;
+    previousAffectionLevelRef.current = currentLevel;
+    if (previousLevel == null || currentLevel <= previousLevel) return;
+    const celebration = { level: currentLevel, name: affectionStageForLevel(currentLevel).name };
+    if (affectionGaugeCelebrationTimerRef.current) clearTimeout(affectionGaugeCelebrationTimerRef.current);
+    setAffectionGaugeCelebration(celebration);
+    affectionGaugeCelebrationTimerRef.current = setTimeout(() => {
+      setAffectionGaugeCelebration(null);
+      queueCelebrationPopup({ kind: 'affection', data: celebration });
+      affectionGaugeCelebrationTimerRef.current = null;
+    }, 950);
+  }, [queueCelebrationPopup, state?.affection]);
+
+  /** ミッション一覧の fade 後に報酬を表示し、native Modal を重ねない。 */
+  useEffect(() => {
+    if (!pendingMissionRewardPopup || missionOpen || dailyMissionRewardPopup != null || hasActiveCelebrationPopup) return;
+    const reward = pendingMissionRewardPopup;
+    const timer = setTimeout(() => {
+      setDailyMissionRewardPopup(reward);
+      setPendingMissionRewardPopup(null);
+    }, 220);
+    return () => clearTimeout(timer);
+  }, [dailyMissionRewardPopup, hasActiveCelebrationPopup, missionOpen, pendingMissionRewardPopup]);
+
+  /** 報酬を閉じた後に、待機していた成長・なつき度演出を必ず一枚ずつ開く。 */
+  useEffect(() => {
+    if (dailyMissionRewardPopup != null || pendingMissionRewardPopup != null || hasActiveCelebrationPopup) return;
+    if (queuedCelebrationPopups.length === 0) return;
+    const [next, ...rest] = queuedCelebrationPopups;
+    setQueuedCelebrationPopups(rest);
+    showCelebrationPopup(next);
+  }, [dailyMissionRewardPopup, hasActiveCelebrationPopup, pendingMissionRewardPopup, queuedCelebrationPopups, showCelebrationPopup]);
+  useEffect(() => {
+    const pending = pendingGrowthPointGainRef.current;
+    if (!pending) return;
+    pendingGrowthPointGainRef.current = null;
+    setGrowthPointGain({ id: ++growthPointGainSerial.current, ...pending });
+  }, [state?.growthLevel, state?.growthPoints]);
 
   useEffect(() => {
     void prepareCareGaugeNotifications();
@@ -801,25 +1425,6 @@ const AppMain: React.FC = () => {
     });
     return () => sub.remove();
   }, []);
-
-  useEffect(() => {
-    if (!state || state.condition === 'dead') {
-      prevFullnessNotifyRef.current = state?.fullness ?? null;
-      prevViscosityNotifyRef.current = state?.viscosity ?? null;
-      return;
-    }
-    const pf = prevFullnessNotifyRef.current;
-    const pv = prevViscosityNotifyRef.current;
-    prevFullnessNotifyRef.current = state.fullness;
-    prevViscosityNotifyRef.current = state.viscosity;
-    if (pf === null || pv === null) return;
-    if (pf > 0 && state.fullness <= 0) {
-      void notifyFullnessEmptyNow();
-    }
-    if (pv > 0 && state.viscosity <= 0) {
-      void notifyViscosityEmptyNow();
-    }
-  }, [state?.fullness, state?.viscosity, state?.condition]);
 
   useEffect(() => {
     if (!state || state.condition === 'dead') return;
@@ -854,26 +1459,10 @@ const AppMain: React.FC = () => {
   useEffect(() => {
     if (!state || state.condition === 'dead') return;
     const id = setInterval(() => {
-      const vn = new Date(Date.now() + timeOffsetRef.current);
-      const nightNow = computeIsNight(vn);
-      const nightCareMult = nightCareRef.current ?? DEFAULT_NIGHT_CARE_MULTIPLIER;
       setState((prev) => {
         if (!prev || prev.condition === 'dead') return prev;
-        const night = nightNow;
-        const mult = computeGrowthMultiplier(
-          prev.fullness,
-          prev.viscosity,
-          night,
-          nightCareMult
-        );
-        const nextCm = Math.min(
-          GROWTH_TARGET_CM,
-          prev.bodyLengthCm + GROWTH_CM_PER_SECOND * mult
-        );
         const fj = sampleDecayJitter();
         const vj = sampleDecayJitter();
-        const fgAdd =
-          RNAppState.currentState === 'active' ? Math.round(1000 * mult) : 0;
         const tickNow = Date.now() + timeOffsetRef.current;
         const gaugeDecayMult =
           RNAppState.currentState === 'active'
@@ -883,35 +1472,25 @@ const AppMain: React.FC = () => {
         const viscosityLoss = VISCOSITY_DECAY_PER_SECOND * vj * gaugeDecayMult;
         const next: AppState = {
           ...prev,
-          bodyLengthCm: nextCm,
           fullness: Math.max(0, prev.fullness - fullnessLoss),
           viscosity: Math.max(0, prev.viscosity - viscosityLoss),
-          sessionForegroundMs: prev.sessionForegroundMs + fgAdd,
           lastGrowthTickMs: Date.now(),
         };
         void saveState(next);
         return next;
       });
-      setGrowthTick((n) => n + 1);
     }, 1000);
     return () => clearInterval(id);
   }, [state?.condition]);
 
   useEffect(() => {
-    if (!state || state.condition === 'dead') return;
-    if (skipNextMilestoneDiffRef.current) {
-      skipNextMilestoneDiffRef.current = false;
-      prevFullStateRef.current = state;
-      return;
-    }
-    const prev = prevFullStateRef.current;
-    prevFullStateRef.current = state;
-    if (prev == null) return;
-    const newly = findNewlyCompletedMilestones(prev, state, getNow().getTime());
-    if (newly.length > 0) {
-      setCelebrationQueue((q) => [...q, ...newly]);
-    }
-  }, [state, getNow]);
+    // 旧・時間成長用のマイルストーンは、育成レベル方式では使わない。
+    // 保存済みの表示キューもここで閉じ、二重の達成演出を出さない。
+    if (!state) return;
+    if (offlineBacklogPageQueue.length > 0) setOfflineBacklogPageQueue([]);
+    if (celebrationQueue.length > 0) setCelebrationQueue([]);
+    if (celebrationItem != null) setCelebrationItem(null);
+  }, [state, offlineBacklogPageQueue.length, celebrationQueue.length, celebrationItem]);
 
   useEffect(() => {
     if (celebrationItem !== null) return;
@@ -1079,9 +1658,10 @@ const AppMain: React.FC = () => {
     };
   }, [getWanderBounds, oosanXAnim, oosanYAnim]);
 
-  const maybePetOnPress = useCallback(() => {
+  const maybePetOnPress = useCallback((isBonus = false) => {
     if (!state || state.condition !== 'healthy') return;
     setIsPetting(true);
+    setIsBonusPetting(isBonus);
     const useNativeDriver = Platform.OS !== 'web';
     Animated.sequence([
       Animated.timing(scaleAnim, {
@@ -1094,17 +1674,146 @@ const AppMain: React.FC = () => {
         duration: 300,
         useNativeDriver,
       }),
-      Animated.delay(450),
+      // ごほうび時は、ゆっくり大きくなる金色ハートが消えるまで表示を保つ。
+      Animated.delay(isBonus ? 2300 : 1500),
     ]).start(() => {
       setIsPetting(false);
+      setIsBonusPetting(false);
     });
   }, [state, scaleAnim]);
+
+  /** 体を直接なでた時は、顔を中央寄りへ戻して目を合わせられるようにする。 */
+  const bringFaceIntoView = useCallback(() => {
+    if (oosanLengthCmRef.current < ADULT_OOSAN_MIN_LENGTH_CM) return;
+    wanderGenRef.current += 1;
+    const generation = wanderGenRef.current;
+    oosanXAnim.stopAnimation();
+    oosanYAnim.stopAnimation();
+    const currentX = (oosanXAnim as any)._value || 0;
+    const currentY = (oosanYAnim as any)._value || 0;
+    // 画面中央側を向かせ、顔の位置（中心から約37%）が中央に来るようにする。
+    const faceRight = currentX <= 0;
+    const faceOffset = oosanLayoutSizeRef.current * 0.37;
+    const { minX, maxX, minY, maxY } = getWanderBounds();
+    const targetX = Math.max(minX, Math.min(maxX, faceRight ? -faceOffset : faceOffset));
+    const targetY = Math.max(minY, Math.min(maxY, currentY));
+    setIsMovingRight(faceRight);
+    setIsOosanWalking(true);
+    Animated.parallel([
+      Animated.timing(oosanXAnim, { toValue: targetX, duration: 760, easing: Easing.inOut(Easing.cubic), useNativeDriver: Platform.OS !== 'web' }),
+      Animated.timing(oosanYAnim, { toValue: targetY, duration: 760, easing: Easing.inOut(Easing.cubic), useNativeDriver: Platform.OS !== 'web' }),
+    ]).start(({ finished }) => {
+      setIsOosanWalking(false);
+      if (finished && wanderGenRef.current === generation) moveOosanRef.current?.();
+    });
+  }, [getWanderBounds, oosanXAnim, oosanYAnim]);
+
+  const onPet = useCallback((showLimitSpeech = false) => {
+    if (!state || state.condition !== 'healthy') return;
+    const preview = applyCareAction(state, 'pet', getNow());
+    const isDirectTap = !showLimitSpeech;
+    const bonusUsesRemaining = state.dailyPetBonusUsesRemaining ?? (
+      state.dailyPetBonusClaimed === true && state.dailyPetBonusUsed !== true ? 1 : 0
+    );
+    const isBonusPet = bonusUsesRemaining > 0;
+    // なつき度の上限後でも、触れた反応としてハートは毎回出す。
+    maybePetOnPress(isBonusPet);
+    if (isBonusPet) {
+      spawnBurst('bonusPet');
+      showCareSpeech('ごほうびなでなで！ もっとなかよしになったよ');
+    }
+    if (isDirectTap) bringFaceIntoView();
+    const madePetProgress = (preview.state.petCountToday ?? 0) !== (state.petCountToday ?? 0);
+    const justCompletedMission = preview.state.dailyPetMissionComplete && !state.dailyPetMissionComplete;
+    if (showLimitSpeech && justCompletedMission) {
+      showCareSpeech('なかよしミッション達成！ ミッションで報酬を受け取ってね');
+    } else if (showLimitSpeech && state.dailyPetMissionComplete && !state.dailyPetBonusClaimed) {
+      showCareSpeech('ミッションで、ごほうびなでなでを受け取ってね');
+    } else if (showLimitSpeech && !madePetProgress) {
+      showCareSpeech(Math.random() < 0.5 ? '今日はたくさんなでてもらったよ〜' : 'うれしいな、また明日ね');
+    }
+    if (madePetProgress) {
+      setState((s) => {
+        if (!s || s.condition !== 'healthy') return s;
+        const care = applyCareAction(s, 'pet', getNow());
+        const next = {
+          ...care.state,
+          latestLog: isDirectTap ? pickOosanMessage(care.state) : pickTapMessage(care.state),
+        };
+        void saveState(next);
+        return next;
+      });
+    } else if (isDirectTap || showLimitSpeech) {
+      setState((s) => {
+        if (!s || s.condition !== 'healthy') return s;
+        const next = { ...s, latestLog: isDirectTap ? pickOosanMessage(s) : pickTapMessage(s) };
+        void saveState(next);
+        return next;
+      });
+    }
+  }, [state, maybePetOnPress, bringFaceIntoView, getNow, showCareSpeech, spawnBurst]);
+
+  /** 短いタップはなでる、指を動かした時だけオオサンショウウオが指についてくる。 */
+  const beginOosanDrag = useCallback((e: GestureResponderEvent) => {
+    if (!state || state.condition === 'dead') return;
+    consumeOosanTouchRef.current = true;
+    setIsOosanDragging(true);
+    wanderGenRef.current += 1;
+    const generation = wanderGenRef.current;
+    oosanXAnim.stopAnimation();
+    oosanYAnim.stopAnimation();
+    oosanDragRef.current = {
+      pageX: e.nativeEvent.pageX,
+      pageY: e.nativeEvent.pageY,
+      x: (oosanXAnim as any)._value || 0,
+      y: (oosanYAnim as any)._value || 0,
+      moved: false,
+      generation,
+    };
+  }, [state, oosanXAnim, oosanYAnim]);
+
+  const moveOosanWithFinger = useCallback((e: GestureResponderEvent) => {
+    const drag = oosanDragRef.current;
+    if (!drag) return;
+    const dx = e.nativeEvent.pageX - drag.pageX;
+    const dy = e.nativeEvent.pageY - drag.pageY;
+    if (Math.hypot(dx, dy) > 7) drag.moved = true;
+    if (!drag.moved) return;
+    const { minX, maxX, minY, maxY } = getWanderBounds();
+    const nextX = Math.max(minX, Math.min(maxX, drag.x + dx));
+    const nextY = Math.max(minY, Math.min(maxY, drag.y + dy));
+    if (Math.abs(dx) > 1) setIsMovingRight(dx > 0);
+    setIsOosanWalking(true);
+    oosanXAnim.setValue(nextX);
+    oosanYAnim.setValue(nextY);
+  }, [getWanderBounds, oosanXAnim, oosanYAnim]);
+
+  const endOosanDrag = useCallback(() => {
+    const drag = oosanDragRef.current;
+    oosanDragRef.current = null;
+    setIsOosanDragging(false);
+    if (!drag) return;
+    // 親の背景タップが同じタッチとして後から届く場合だけ無視し、次の通常タップには影響させない。
+    setTimeout(() => { consumeOosanTouchRef.current = false; }, 0);
+    if (!drag.moved) {
+      onPet(false);
+      return;
+    }
+    setIsOosanWalking(false);
+    // 指を離して少し落ち着いてから、いつものゆっくりした自動遊泳へ戻る。
+    setTimeout(() => {
+      if (wanderGenRef.current === drag.generation) moveOosanRef.current?.();
+    }, 850);
+  }, [onPet]);
 
   /** タップ位置へ向きを合わせて移動し、その後また自動うろうろへ */
   const handleContainerPress = useCallback(
     (e: GestureResponderEvent) => {
+      if (consumeOosanTouchRef.current) {
+        consumeOosanTouchRef.current = false;
+        return;
+      }
       if (!state || state.condition === 'dead') return;
-      maybePetOnPress();
       if (state.condition !== 'healthy' && state.condition !== 'weak') return;
 
       const { pageX, pageY, locationX, locationY } = e.nativeEvent;
@@ -1120,9 +1829,19 @@ const AppMain: React.FC = () => {
         const currentX = (oosanXAnim as any)._value || 0;
         const currentY = (oosanYAnim as any)._value || 0;
         const { minX, maxX, minY, maxY } = getWanderBounds();
-        const targetX = minX + tapNormX * (maxX - minX);
-        const targetY = minY + tapNormY * (maxY - minY);
-        setIsMovingRight(targetX > currentX);
+        // タップ地点へ胴体の中心を置くのではなく、進行方向側の顔を近づける。
+        // 大きく育ったあとも、顔が画面外へ逃げずに触れ合えるようにする。
+        const desiredFaceX = minX + tapNormX * (maxX - minX);
+        const desiredFaceY = minY + tapNormY * (maxY - minY);
+        const movingRight = desiredFaceX > currentX;
+        const bodySize = oosanLayoutSizeRef.current;
+        const faceOffset = bodySize * (oosanLengthCmRef.current >= ADULT_OOSAN_MIN_LENGTH_CM ? 0.37 : 0.25);
+        const targetX = Math.max(
+          minX,
+          Math.min(maxX, desiredFaceX - (movingRight ? faceOffset : -faceOffset))
+        );
+        const targetY = Math.max(minY, Math.min(maxY, desiredFaceY));
+        setIsMovingRight(movingRight);
         setIsOosanWalking(true);
         const useNativeDriver = Platform.OS !== 'web';
         const dist = Math.hypot(targetX - currentX, targetY - currentY);
@@ -1169,7 +1888,7 @@ const AppMain: React.FC = () => {
         runTapMove(tapNormX, tapNormY, locationX, locationY);
       }
     },
-    [state, maybePetOnPress, getWanderBounds, oosanXAnim, oosanYAnim]
+    [state, getWanderBounds, oosanXAnim, oosanYAnim]
   );
 
 
@@ -1182,9 +1901,69 @@ const AppMain: React.FC = () => {
   }
 
   const { width: screenWidth, height: screenHeight } = Dimensions.get('window');
-  const lengthCm = Math.min(GROWTH_TARGET_CM, state.bodyLengthCm);
+  const lengthCm = Math.max(0, state.bodyLengthCm);
+  const claimedGrowthMissionIds = new Set(state.claimedGrowthMissionIds ?? []);
+  // 段階名だけの行（25cmなど）は案内表には残すが、成長ミッションにはしない。
+  const growthMissionStages = GROWTH_STAGES.filter(
+    (stage) => stage.cm >= 1 && growthMissionRewardKindForCm(stage.cm) !== 'none'
+  );
+  const availableGrowthMission = growthMissionStages.find(
+    (stage) => lengthCm + 1e-9 >= stage.cm && !claimedGrowthMissionIds.has(growthMissionIdForCm(stage.cm))
+  );
+  const nextGrowthMission = growthMissionStages.find((stage) => stage.cm > lengthCm + 1e-9);
+  const displayedGrowthMission = availableGrowthMission ?? nextGrowthMission;
   const isAdultOosan = lengthCm >= ADULT_OOSAN_MIN_LENGTH_CM;
-  const lengthCmText = formatOosanLengthCm(lengthCm);
+  const lengthCmText = lengthCm.toFixed(1);
+  const growthLevel = state.growthLevel ?? 1;
+  const growthPoints = state.growthPoints ?? 0;
+  const growthPointsNeeded = growthPointsRequiredForLevel(growthLevel);
+  const bonusFeedCare = state.bonusFeedCare ?? 0;
+  const bonusWaterCare = state.bonusWaterCare ?? 0;
+  const initialFeedCareGuide = initialCareGuide.feed;
+  const initialWaterCareGuide = initialCareGuide.water;
+  const feedGrowthPointsToday = state.feedGrowthPointsToday ?? 0;
+  const waterGrowthPointsToday = state.waterGrowthPointsToday ?? 0;
+  const dailyCarePointCap = dailyCareGrowthPointCapForLevel(growthLevel);
+  const feedDailyPointCapReached = feedGrowthPointsToday >= dailyCarePointCap;
+  const waterDailyPointCapReached = waterGrowthPointsToday >= dailyCarePointCap;
+  const feedPointReward = careGrowthPointsForGauge(state.fullness, growthLevel);
+  const waterPointReward = careGrowthPointsForGauge(state.viscosity, growthLevel);
+  const canEarnFeedPoint = feedPointReward > 0 && !feedDailyPointCapReached && growthPointsNeeded > 0;
+  const canEarnWaterPoint = waterPointReward > 0 && !waterDailyPointCapReached && growthPointsNeeded > 0;
+  const feedPointWait = growthPointWaitLabel(state.fullness, FULLNESS_SECONDS_PER_ONE_PERCENT);
+  const waterPointWait = growthPointWaitLabel(state.viscosity, VISCOSITY_SECONDS_PER_ONE_PERCENT);
+  const dailyFeedMissionComplete = state.dailyFeedMissionComplete === true;
+  const dailyWaterMissionComplete = state.dailyWaterMissionComplete === true;
+  const dailyPetMissionComplete = state.dailyPetMissionComplete === true;
+  const dailyPetBonusClaimed = state.dailyPetBonusClaimed === true;
+  const dailyPetBonusUsed = state.dailyPetBonusUsed === true;
+  const dailyCareBonusAwarded = state.dailyCareBonusAwarded === true;
+  const dailyCareMissionComplete = dailyFeedMissionComplete && dailyWaterMissionComplete;
+  const dailyCareRewardAvailable = dailyCareMissionComplete && !dailyCareBonusAwarded;
+  const affection = state.affection ?? 0;
+  const normalPetLimit = dailyPetNormalLimitForAffectionValue(affection);
+  const petNormalCount = Math.min(normalPetLimit, state.petNormalCountToday ?? Math.min(state.petCountToday ?? 0, normalPetLimit));
+  const petRewardAvailable = dailyPetMissionComplete && !dailyPetBonusClaimed && !dailyPetBonusUsed;
+  const petBonusUsesRemaining = Math.max(0, Math.min(DAILY_PET_BONUS_USES, state.dailyPetBonusUsesRemaining ?? (dailyPetBonusClaimed && !dailyPetBonusUsed ? 1 : 0)));
+  const petBonusAvailable = petBonusUsesRemaining > 0;
+  const canPetToday = petNormalCount < normalPetLimit || petBonusAvailable;
+  const missionRewardAvailable = dailyCareRewardAvailable || petRewardAvailable || availableGrowthMission != null;
+  const affectionLevel = affectionLevelForValue(affection);
+  const displayedAffectionLevel = affectionGaugeCelebration
+    ? Math.max(1, affectionGaugeCelebration.level - 1)
+    : affectionLevel;
+  const affectionProgress = affectionProgressForValue(affection);
+  const affectionActionsInLevel = affectionProgress.progress;
+  const affectionActionsNeeded = affectionProgress.required;
+  const affectionLevelProgress =
+    affectionGaugeCelebration ? 1 : affectionActionsNeeded > 0 ? affectionActionsInLevel / affectionActionsNeeded : 1;
+  const affectionColor = affectionHeartColorForLevel(displayedAffectionLevel);
+  const affectionProgressText =
+    affectionGaugeCelebration
+      ? '満タン！'
+      : affectionActionsNeeded > 0
+        ? `次のLvまで ${affectionActionsInLevel} / ${affectionActionsNeeded}回`
+        : 'なかよし MAX';
   const virtualNow = getNow();
   const isNight = computeIsNight(virtualNow);
   const isMorningNatural = computeIsMorning(virtualNow);
@@ -1197,21 +1976,7 @@ const AppMain: React.FC = () => {
   const showDayBadge =
     DEBUG_FORCE_DAY_UI ||
     (!DEBUG_FORCE_MORNING_UI && isDaytimeNatural && !isNight);
-  const growthMult = computeGrowthMultiplier(
-    state.fullness,
-    state.viscosity,
-    isNight,
-    debugNightCareMultiplier ?? DEFAULT_NIGHT_CARE_MULTIPLIER
-  );
-  const multLabel = formatGrowthMultiplier(growthMult);
   const phaseLabel = getGrowthPhaseLabel(lengthCm);
-  const nowMs = virtualNow.getTime();
-  const nextMilestoneLine =
-    state.condition !== 'dead'
-      ? getNextMilestoneLine(state, nowMs, growthMult)
-      : null;
-  const hourlyGoalHint =
-    state.condition !== 'dead' ? hourlyGoalLabel(state, nowMs) : null;
   // 夜間（logic.computeIsNight: 19〜6時）のみ nightDim=1。昼は 0 でベールは見えない。
   const nightOverlayOpacity = nightDim.interpolate({
     inputRange: [0, 1],
@@ -1220,7 +1985,7 @@ const AppMain: React.FC = () => {
   const shortSide = Math.min(screenWidth, screenHeight);
   // 100cm 時: 短辺の約2倍幅。中央配置のためおおむね半分が画面外に出る目安（cm 表示とは別スケール）
   const oosanMaxWidthPx = shortSide * 2;
-  const growthT = Math.min(1, lengthCm / 100);
+  const growthT = Math.min(1, lengthCm / DISPLAY_LENGTH_CAP_CM);
   const minOosanPx = Math.min(64, Math.max(48, shortSide * 0.14));
   const sizeMax = Math.max(minOosanPx, oosanMaxWidthPx);
   const size = minOosanPx + growthT * (sizeMax - minOosanPx);
@@ -1252,6 +2017,7 @@ const AppMain: React.FC = () => {
       contentContainerStyle={styles.scrollContent}
       showsVerticalScrollIndicator={false}
       showsHorizontalScrollIndicator={false}
+      scrollEnabled={!isOosanDragging}
     >
       <Pressable
         ref={mainPressableRef}
@@ -1286,23 +2052,66 @@ const AppMain: React.FC = () => {
 
         {state.condition !== 'dead' && showNightChrome && (
           <View style={styles.moonBadge} pointerEvents="none">
-            <Ionicons name="moon" size={22} color="rgba(230, 240, 255, 0.92)" />
+            <Ionicons name="moon" size={14} color="rgba(230, 240, 255, 0.92)" />
             <Text style={styles.moonBadgeLabel}>夜</Text>
           </View>
         )}
 
         {state.condition !== 'dead' && showMorningBadge && (
           <View style={styles.sunBadge} pointerEvents="none">
-            <Ionicons name="sunny" size={22} color="rgba(255, 248, 220, 0.98)" />
+            <Ionicons name="sunny" size={14} color="rgba(255, 248, 220, 0.98)" />
             <Text style={styles.sunBadgeLabel}>朝</Text>
           </View>
         )}
 
         {state.condition !== 'dead' && showDayBadge && (
           <View style={styles.dayBadge} pointerEvents="none">
-            <Ionicons name="partly-sunny" size={22} color="rgba(255, 252, 235, 0.96)" />
+            <Ionicons name="partly-sunny" size={14} color="rgba(255, 252, 235, 0.96)" />
             <Text style={styles.dayBadgeLabel}>昼</Text>
           </View>
+        )}
+
+        {state.condition !== 'dead' && (
+          <LevelProgressOrb
+            cmText={lengthCmText}
+            bodyLengthCm={lengthCm}
+            points={growthPoints}
+            pointsNeeded={growthPointsNeeded}
+            onPress={() => setGrowthGuideOpen(true)}
+            pointGain={growthPointGain}
+          />
+        )}
+
+        {growthPointGain && (
+          <GrowthPointFlight
+            key={growthPointGain.id}
+            gain={growthPointGain}
+            screenWidth={screenWidth}
+            screenHeight={screenHeight}
+          />
+        )}
+
+        {state.condition !== 'dead' && (
+          <View
+            style={styles.phaseBadge}
+          >
+            <Text style={styles.phaseBadgeText}>{phaseLabel}</Text>
+          </View>
+        )}
+
+        {state.condition !== 'dead' && (
+          <Pressable
+            style={styles.nameBadge}
+            onPress={(event) => {
+              event.stopPropagation();
+              openNameEditor();
+            }}
+            accessibilityRole="button"
+            accessibilityLabel="オオサンショウウオの名前を変更する"
+          >
+            <Ionicons name="pencil" size={12} color="#effbff" />
+            <Text numberOfLines={2} style={styles.nameBadgeText}>{state.oosanName ?? DEFAULT_OOSAN_NAME}</Text>
+          </Pressable>
         )}
 
         {tapRipples.length > 0 && (
@@ -1336,21 +2145,63 @@ const AppMain: React.FC = () => {
             ]}
           >
             {imagesLoaded && (
-              <ExpoImage
-                source={
-                  isAdultOosan
-                    ? ADULT_WALK_FRAMES[adultWalkFrameIndex]
-                    : require('./assets/images/sansyo_toka2.gif')
-                }
-                style={[
-                  styles.oosan,
-                  { width: size, height: isAdultOosan ? size * 0.55 : size * 0.8 },
-                  isMovingRight && { transform: [{ scaleX: -1 }] },
-                ]}
-                contentFit="contain"
-              />
+              <View
+                onStartShouldSetResponder={() => true}
+                onMoveShouldSetResponder={() => true}
+                onMoveShouldSetResponderCapture={() => true}
+                onResponderGrant={beginOosanDrag}
+                onResponderMove={moveOosanWithFinger}
+                onResponderRelease={endOosanDrag}
+                onResponderTerminate={endOosanDrag}
+                onResponderTerminationRequest={() => false}
+                accessibilityRole="button"
+                accessibilityLabel="オオサンショウウオをなでる、または指で動かす"
+                style={styles.oosanTouchArea}
+              >
+                <ExpoImage
+                  source={
+                    isAdultOosan
+                      ? ADULT_WALK_FRAMES[adultWalkFrameIndex]
+                      : require('./assets/images/sansyo_toka2.gif')
+                  }
+                  style={[
+                    styles.oosan,
+                    { width: size, height: isAdultOosan ? size * 0.55 : size * 0.8 },
+                    isMovingRight && { transform: [{ scaleX: -1 }] },
+                  ]}
+                  contentFit="contain"
+                />
+              </View>
             )}
-            {isPetting && <PetHeartBurst size={size} />}
+            {careSpeech && (
+              <View style={[styles.careSpeechBubble, { bottom: isAdultOosan ? size * 0.42 : size * 0.62 }]} pointerEvents="none">
+                <Text style={styles.careSpeechText}>{careSpeech}</Text>
+              </View>
+            )}
+            {isPetting && (
+              <>
+                <PetHeartBurst
+                  size={size}
+                  heartCount={isBonusPetting ? 3 : affectionEffectHeartCountForLevel(affectionLevel)}
+                  color={isBonusPetting ? '#f2b938' : affectionHeartColorForLevel(affectionLevel)}
+                  durationMsOverride={isBonusPetting ? 2200 : undefined}
+                  slowGrow={isBonusPetting}
+                  peakScale={isBonusPetting ? 1.65 : undefined}
+                />
+                {isBonusPetting && (
+                  <PetHeartBurst
+                    size={size}
+                    heartCount={2}
+                    color="#fff3a0"
+                    startDelay={140}
+                    symbol="✦"
+                    durationMsOverride={1850}
+                    slowGrow
+                    peakScale={1.35}
+                  />
+                )}
+              </>
+            )}
           </Animated.View>
         )}
 
@@ -1362,7 +2213,8 @@ const AppMain: React.FC = () => {
           </View>
         )}
 
-        <View style={styles.bottomStack}>
+        {/* 数値・説明などの情報HUDは、オオサンより奥に置く。 */}
+        <View style={styles.bottomInfoStack}>
           {state.condition === 'dead' ? (
             <View style={styles.deadState}>
               <View style={styles.deadMessagePanel}>
@@ -1386,95 +2238,207 @@ const AppMain: React.FC = () => {
           ) : (
             <>
             <View style={styles.dailyLogStrip}>
-              <Animated.Text style={[styles.dailyLog, { opacity: dailyLogOpacity }]}>
-                {state.latestLog}
+              <Animated.Text style={[styles.dailyLog, { opacity: dailyLogOpacity }]}> 
+                {oosanMessageUsesName(state.latestLog)
+                  ? namedOosanNarration(state.oosanName ?? DEFAULT_OOSAN_NAME, state.latestLog)
+                  : state.latestLog}
               </Animated.Text>
-            </View>
-            <View style={[styles.hudGlassPanel, styles.lengthHudPanel]}>
-              <View style={styles.mainCounterRow}>
-                <Text style={styles.hudStatLabel}>体長</Text>
-                <MainLengthCounter cmText={lengthCmText} phase={phaseLabel} />
-              </View>
-              <Text style={styles.growthMultHint}>成長倍率 {multLabel}</Text>
-              <Text style={styles.growthMultFootnote}>
-                基準は x1。おなか・ヌメリが高いほど加速（満タンで昼あたり最大 x3 前後、夜はさらにボーナス）
-              </Text>
-              {nextMilestoneLine && (
-                <Text style={styles.nextMilestoneText}>{nextMilestoneLine.line}</Text>
-              )}
-              {hourlyGoalHint && (
-                <Text style={styles.hourlyGoalHint}>{hourlyGoalHint}</Text>
-              )}
             </View>
             <View style={[styles.hudGlassPanel, styles.gaugeBlock]}>
               <View style={styles.gaugeRow}>
                 <View style={styles.gaugeLabelRow}>
                   <Text style={styles.gaugeLabelShrink}>おなか</Text>
+                  <TouchableOpacity
+                    onPress={() => setCareTimingInfoOpen(true)}
+                    hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                    accessibilityLabel="おなかとヌメリの減少時間を確認する"
+                  >
+                    <Ionicons name="information-circle-outline" size={15} color="#ffffff" style={styles.gaugeInfoIcon} />
+                  </TouchableOpacity>
                   {state.fullness < 38 && (
-                    <Ionicons
-                      name="warning"
-                      size={16}
-                      color="#ffcc80"
-                      style={styles.viscosityWarnIcon}
-                    />
+                    <TouchableOpacity
+                      onPress={() => showCareGaugeWarning('feed', state.fullness <= 0)}
+                      hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                      style={styles.gaugeWarningButton}
+                      accessibilityLabel="おなかの状態を確認する"
+                    >
+                      <Ionicons
+                        name="warning"
+                        size={16}
+                        color="#ffcc80"
+                        style={styles.viscosityWarnIcon}
+                      />
+                    </TouchableOpacity>
                   )}
                 </View>
                 <View style={styles.gaugeTrack}>
-                  <View
-                    style={[
-                      styles.gaugeFill,
-                      {
-                        width: `${Math.round(state.fullness)}%`,
-                        backgroundColor: fullnessBarColor(state.fullness),
-                      },
-                    ]}
-                  />
+                  <View style={styles.gaugeBarBackground}>
+                    <View
+                      style={[
+                        styles.gaugeFill,
+                        {
+                          width: `${Math.round(state.fullness)}%`,
+                          backgroundColor: fullnessBarColor(state.fullness),
+                        },
+                      ]}
+                    />
+                    <View pointerEvents="none" style={[styles.gaugeDivider, styles.gaugeDividerFirst]} />
+                    <View pointerEvents="none" style={[styles.gaugeDivider, styles.gaugeDividerSecond]} />
+                  </View>
+                  <View style={styles.gaugeRewardScale} pointerEvents="none">
+                    <Text style={styles.gaugeRewardLabel}>+1pt</Text>
+                    <Text style={styles.gaugeRewardLabel}>+1pt</Text>
+                    <Text style={styles.gaugeRewardLabel}>+1pt</Text>
+                  </View>
                 </View>
                 <Text style={styles.gaugePct}>{Math.round(state.fullness)}%</Text>
               </View>
               <View style={[styles.gaugeRow, styles.gaugeRowLast]}>
                 <View style={styles.gaugeLabelRow}>
                   <Text style={styles.gaugeLabelShrink}>ヌメリ</Text>
+                  <TouchableOpacity
+                    onPress={() => setCareTimingInfoOpen(true)}
+                    hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                    accessibilityLabel="おなかとヌメリの減少時間を確認する"
+                  >
+                    <Ionicons name="information-circle-outline" size={15} color="#ffffff" style={styles.gaugeInfoIcon} />
+                  </TouchableOpacity>
                   {state.viscosity < 38 && (
-                    <Ionicons
-                      name="warning"
-                      size={16}
-                      color="#ffcc80"
-                      style={styles.viscosityWarnIcon}
-                    />
+                    <TouchableOpacity
+                      onPress={() => showCareGaugeWarning('water', state.viscosity <= 0)}
+                      hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                      style={styles.gaugeWarningButton}
+                      accessibilityLabel="ヌメリの状態を確認する"
+                    >
+                      <Ionicons
+                        name="warning"
+                        size={16}
+                        color="#ffcc80"
+                        style={styles.viscosityWarnIcon}
+                      />
+                    </TouchableOpacity>
                   )}
                 </View>
                 <View style={styles.gaugeTrack}>
-                  <View
-                    style={[
-                      styles.gaugeFill,
-                      styles.gaugeFillViscosity,
-                      { width: `${Math.round(state.viscosity)}%` },
-                    ]}
-                  />
+                  <View style={styles.gaugeBarBackground}>
+                    <View
+                      style={[
+                        styles.gaugeFill,
+                        styles.gaugeFillViscosity,
+                        {
+                          width: `${Math.round(state.viscosity)}%`,
+                          backgroundColor: viscosityBarColor(state.viscosity),
+                        },
+                      ]}
+                    />
+                    <View pointerEvents="none" style={[styles.gaugeDivider, styles.gaugeDividerFirst]} />
+                    <View pointerEvents="none" style={[styles.gaugeDivider, styles.gaugeDividerSecond]} />
+                  </View>
+                  <View style={styles.gaugeRewardScale} pointerEvents="none">
+                    <Text style={styles.gaugeRewardLabel}>+1pt</Text>
+                    <Text style={styles.gaugeRewardLabel}>+1pt</Text>
+                    <Text style={styles.gaugeRewardLabel}>+1pt</Text>
+                  </View>
                 </View>
                 <Text style={styles.gaugePct}>{Math.round(state.viscosity)}%</Text>
               </View>
             </View>
-            <View style={styles.actionRow}>
-              <TouchableOpacity
-                style={[styles.actionBtn, styles.actionBtnFeed]}
-                onPress={onFeed}
-                activeOpacity={0.85}
-              >
-                <Text style={styles.actionBtnText}>Feed</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.actionBtn, styles.actionBtnWater]}
-                onPress={onWater}
-                activeOpacity={0.85}
-              >
-                <Text style={styles.actionBtnText}>Water</Text>
-              </TouchableOpacity>
+            <View style={[styles.hudGlassPanel, styles.affectionBlock]}>
+              <View style={styles.affectionHeader}>
+                <Text style={styles.affectionLabel}>なつき</Text>
+                <Text style={styles.affectionLevelText}>Lv.{displayedAffectionLevel} / 100</Text>
+                <Pressable
+                  style={styles.guideInfoButton}
+                  onPress={(event) => {
+                    event.stopPropagation();
+                    setGrowthGuideOpen(true);
+                  }}
+                  accessibilityRole="button"
+                  accessibilityLabel="なつき度ガイドを開く"
+                >
+                  <Ionicons name="information-circle-outline" size={20} color="#f9dfe5" />
+                </Pressable>
+              </View>
+              <AffectionLevelHearts level={displayedAffectionLevel} />
+              <View style={styles.affectionProgressRow}>
+                <View style={styles.affectionProgressTrack}>
+                  <View
+                    style={[
+                      styles.affectionProgressFill,
+                      { backgroundColor: affectionColor, width: `${Math.round(affectionLevelProgress * 100)}%` },
+                    ]}
+                  />
+                  {affectionGaugeCelebration && <AffectionGaugeFullEffect color={affectionColor} />}
+                </View>
+                <Text style={styles.affectionProgressText}>{affectionProgressText}</Text>
+              </View>
+              <Text style={styles.affectionHint}>なでると仲良くなれます（1日{normalPetLimit}回まで）</Text>
             </View>
             </>
           )}
         </View>
+        {/* お世話ボタンは常にオオサンより手前。 */}
+        {state.condition !== 'dead' && (
+          <View style={styles.bottomActionStack}>
+            <View style={styles.actionRow}>
+              <View style={[styles.actionItem, styles.actionItemFeed]}>
+                <TouchableOpacity
+                  style={[styles.actionBtn, styles.actionBtnFeed, (bonusFeedCare > 0 || initialFeedCareGuide) && styles.actionBtnBonus, bonusFeedCare <= 0 && !canEarnFeedPoint && styles.actionBtnFeedNoPoint]}
+                  onPress={onFeed}
+                  activeOpacity={0.85}
+                >
+                  <Text style={[styles.actionBtnText, bonusFeedCare > 0 && styles.actionBtnTextBonus, bonusFeedCare <= 0 && !canEarnFeedPoint && styles.actionBtnTextNoPoint]}>{bonusFeedCare > 0 ? 'ごほうびごはん' : 'ごはん'}</Text>
+                </TouchableOpacity>
+                <View style={styles.actionPointSlot} pointerEvents="none">
+                  <Text numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.72} style={[styles.actionPointHint, bonusFeedCare > 0 && styles.actionPointHintBonus, bonusFeedCare <= 0 && !canEarnFeedPoint && styles.actionPointHintNoPoint]}>
+                    {bonusFeedCare > 0 ? `ごほうび あと${bonusFeedCare}回` : feedDailyPointCapReached ? `今日${dailyCarePointCap}ptまで` : canEarnFeedPoint ? '+1pt' : feedPointWait}
+                  </Text>
+                </View>
+              </View>
+              <View style={[styles.actionItem, styles.actionItemWater]}>
+                <TouchableOpacity
+                  style={[styles.actionBtn, styles.actionBtnWater, (bonusWaterCare > 0 || initialWaterCareGuide) && styles.actionBtnBonus, bonusWaterCare <= 0 && !canEarnWaterPoint && styles.actionBtnWaterNoPoint]}
+                  onPress={onWater}
+                  activeOpacity={0.85}
+                >
+                  <Text style={[styles.actionBtnText, bonusWaterCare > 0 && styles.actionBtnTextBonus, bonusWaterCare <= 0 && !canEarnWaterPoint && styles.actionBtnTextNoPoint]}>{bonusWaterCare > 0 ? 'ごほうびおみず' : 'おみず'}</Text>
+                </TouchableOpacity>
+                <View style={styles.actionPointSlot} pointerEvents="none">
+                  <Text numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.72} style={[styles.actionPointHint, bonusWaterCare > 0 && styles.actionPointHintBonus, bonusWaterCare <= 0 && !canEarnWaterPoint && styles.actionPointHintNoPoint]}>
+                    {bonusWaterCare > 0 ? `ごほうび あと${bonusWaterCare}回` : waterDailyPointCapReached ? `今日${dailyCarePointCap}ptまで` : canEarnWaterPoint ? '+1pt' : waterPointWait}
+                  </Text>
+                </View>
+              </View>
+              <View style={[styles.actionItem, styles.actionItemPet]}>
+                <TouchableOpacity style={[styles.actionBtn, styles.actionBtnPet, petBonusAvailable && styles.actionBtnBonus, !canPetToday && styles.actionBtnPetResting]} onPress={() => onPet(true)} activeOpacity={0.85}>
+                  {petBonusAvailable && <Ionicons pointerEvents="none" name="sparkles" size={12} color="#fff4b5" style={styles.bonusPetSparkleLeft} />}
+                  <Text style={[styles.actionBtnText, petBonusAvailable && styles.actionBtnTextBonus]}>{petBonusAvailable ? 'ごほうびなでなで' : 'なでる'}</Text>
+                  {petBonusAvailable && <Ionicons pointerEvents="none" name="sparkles" size={12} color="#fff4b5" style={styles.bonusPetSparkleRight} />}
+                </TouchableOpacity>
+                <View style={styles.actionPointSlot} pointerEvents="none">
+                  <Text style={[styles.actionPointHint, petBonusAvailable && styles.actionPointHintBonus]}>
+                    {petBonusAvailable ? `ごほうび あと${petBonusUsesRemaining}回` : petNormalCount < normalPetLimit ? `あと ${normalPetLimit - petNormalCount}回` : '今日はおしまい'}
+                  </Text>
+                </View>
+              </View>
+            </View>
+          </View>
+        )}
+        {state.condition !== 'dead' && (
+          <TouchableOpacity
+            style={styles.missionFloatingButton}
+            onPress={() => setMissionOpen(true)}
+            activeOpacity={0.85}
+            accessibilityLabel="きょうのミッションを開く"
+            hitSlop={{ top: 22, bottom: 22, left: 22, right: 22 }}
+          >
+            <View style={styles.missionLogIconCircle}>
+              <Ionicons name="checkbox-outline" size={30} color="rgba(255,255,255,0.97)" />
+              {missionRewardAvailable && <View style={styles.missionFabDot} />}
+            </View>
+            <Text style={styles.missionLogLabel}>ミッション</Text>
+          </TouchableOpacity>
+        )}
       </Pressable>
     </ScrollView>
 
@@ -1489,6 +2453,423 @@ const AppMain: React.FC = () => {
       </TouchableOpacity>
 
       <LegalInfoModal visible={legalInfoOpen} onClose={() => setLegalInfoOpen(false)} />
+      <GrowthGuideModal
+        visible={growthGuideOpen}
+        onClose={() => setGrowthGuideOpen(false)}
+        affection={state?.affection ?? 0}
+        bodyLengthCm={state?.bodyLengthCm ?? 0.5}
+        oosanName={state?.oosanName ?? DEFAULT_OOSAN_NAME}
+      />
+
+      <Modal
+        visible={restartConfirmOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setRestartConfirmOpen(false)}
+      >
+        <View style={styles.missionRewardBackdrop}>
+          <View style={styles.missionRewardPopupCard}>
+            <View style={styles.careWarningPopupIcon}>
+              <Ionicons name="refresh" size={34} color="#3baee0" />
+            </View>
+            <Text style={styles.missionRewardPopupEyebrow}>NEW JOURNEY</Text>
+            <Text style={styles.missionRewardPopupTitle}>新しく迎えますか？</Text>
+            <Text style={styles.missionRewardPopupBody}>これまでの体長・おなか・ぬめり・成長の状態は初期化されます。</Text>
+            <View style={styles.restartConfirmActions}>
+              <Pressable style={styles.restartConfirmCancel} onPress={() => setRestartConfirmOpen(false)}>
+                <Text style={styles.restartConfirmCancelText}>今は閉じる</Text>
+              </Pressable>
+              <Pressable style={styles.restartConfirmStart} onPress={confirmRestartWithNewOosan}>
+                <Text style={styles.missionRewardPopupButtonText}>迎える</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal
+        visible={newOosanGuideOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={beginLifeWithOosan}
+      >
+        <KeyboardAvoidingView style={styles.nameModalKeyboardAvoider} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+        <View style={[styles.missionRewardBackdrop, styles.nameModalBackdrop]}>
+          <View style={[styles.missionRewardPopupCard, styles.newOosanGuideCard, styles.nameEntryPopupCard]}>
+            <Pressable style={styles.nameModalCloseButton} onPress={beginLifeWithOosan} accessibilityRole="button" accessibilityLabel="名前を確定して閉じる">
+              <Ionicons name="close" size={21} color="#52766d" />
+            </Pressable>
+            <Text style={styles.missionRewardPopupEyebrow}>WELCOME TO THE RIVER</Text>
+            <Text style={styles.missionRewardPopupTitle}>オオサンショウウオがやってきた！</Text>
+            <ExpoImage
+              source={require('./assets/images/sansyo_toka2.gif')}
+              style={styles.newOosanGuideImage}
+              contentFit="contain"
+            />
+            <Text style={styles.missionRewardPopupBody}>この子のなまえを決めよう</Text>
+            <TextInput
+              value={nameDraft}
+              onChangeText={setNameDraft}
+              maxLength={15}
+              selectTextOnFocus
+              returnKeyType="done"
+              // キーボードの「完了」で、入力中の名前を確定して案内を閉じる。
+              onSubmitEditing={beginLifeWithOosan}
+              placeholder={DEFAULT_OOSAN_NAME}
+              placeholderTextColor="#9bb5af"
+              style={styles.nameInput}
+              accessibilityLabel="オオサンショウウオの名前"
+            />
+            <Text style={styles.missionRewardPopupBody}>
+              まずは「ごはん」と「おみず」をあげて、{`\n`}元気にしてあげよう。
+            </Text>
+            <Pressable style={styles.missionRewardPopupButton} onPress={beginLifeWithOosan}>
+              <Text style={styles.missionRewardPopupButtonText}>お世話をはじめる</Text>
+            </Pressable>
+          </View>
+        </View>
+        </KeyboardAvoidingView>
+      </Modal>
+
+      <Modal
+        visible={nameEditorOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={saveOosanName}
+      >
+        <KeyboardAvoidingView style={styles.nameModalKeyboardAvoider} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+        <View style={[styles.missionRewardBackdrop, styles.nameModalBackdrop]}>
+          <View style={[styles.missionRewardPopupCard, styles.nameEntryPopupCard]}>
+            <Pressable style={styles.nameModalCloseButton} onPress={saveOosanName} accessibilityRole="button" accessibilityLabel="名前を確定して閉じる">
+              <Ionicons name="close" size={21} color="#52766d" />
+            </Pressable>
+            <View style={styles.missionRewardPopupIcon}>
+              <Ionicons name="create" size={32} color="#3baee0" />
+            </View>
+            <Text style={styles.missionRewardPopupEyebrow}>NAME YOUR FRIEND</Text>
+            <Text style={styles.missionRewardPopupTitle}>なまえをつけよう</Text>
+            <Text style={styles.missionRewardPopupBody}>15文字まで。いつでもここから変えられます。</Text>
+            <TextInput
+              value={nameDraft}
+              onChangeText={setNameDraft}
+              maxLength={15}
+              selectTextOnFocus
+              returnKeyType="done"
+              // キーボードの「完了」でも、入力中の名前を確定して閉じられる。
+              onSubmitEditing={saveOosanName}
+              placeholder={DEFAULT_OOSAN_NAME}
+              placeholderTextColor="#9bb5af"
+              style={styles.nameInput}
+              accessibilityLabel="オオサンショウウオの名前"
+            />
+            <View style={styles.restartConfirmActions}>
+              <Pressable style={styles.restartConfirmCancel} onPress={() => setNameEditorOpen(false)}>
+                <Text style={styles.restartConfirmCancelText}>やめる</Text>
+              </Pressable>
+              <Pressable style={styles.restartConfirmStart} onPress={saveOosanName}>
+                <Text style={styles.missionRewardPopupButtonText}>決定</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+        </KeyboardAvoidingView>
+      </Modal>
+
+      <Modal
+        visible={careWarningOpen !== null}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setCareWarningOpen(null)}
+      >
+        {careWarningOpen && (() => {
+          const isFeed = careWarningOpen.kind === 'feed';
+          const resource = isFeed ? 'おなか' : 'ヌメリ';
+          const action = isFeed ? 'ごはん' : 'おみず';
+          return (
+            <View style={styles.missionRewardBackdrop}>
+              <View style={[styles.missionRewardPopupCard, styles.careWarningPopupCard]}>
+                <View style={styles.careWarningPopupIcon}>
+                  <Ionicons name="warning" size={34} color="#c9841d" />
+                </View>
+                <Text style={styles.careWarningEyebrow}>CARE CHECK</Text>
+                <Text style={styles.careWarningTitle}>
+                  {careWarningOpen.isEmpty ? `${resource}が空っぽ！` : `${resource}が少なくなっています`}
+                </Text>
+                <Text style={styles.careWarningBody}>
+                  {careWarningOpen.isEmpty
+                    ? `はやく「${action}」をあげてね。\n\n空っぽのまま放置せず、毎日様子を見にきてください。30日間会えないと、オオサンショウウオは旅立ってしまいます。`
+                    : `もうすぐ${resource}が空っぽになります。\n「${action}」で元気にしてあげてね。`}
+                </Text>
+                <Pressable style={styles.careWarningPopupButton} onPress={() => setCareWarningOpen(null)}>
+                  <Text style={styles.missionRewardPopupButtonText}>お世話する</Text>
+                </Pressable>
+              </View>
+            </View>
+          );
+        })()}
+      </Modal>
+
+      <Modal
+        visible={careTimingInfoOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setCareTimingInfoOpen(false)}
+      >
+        <View style={styles.missionRewardBackdrop}>
+          <View style={[styles.missionRewardPopupCard, styles.careWarningPopupCard]}>
+            <View style={styles.careWarningPopupIcon}>
+              <Ionicons name="time-outline" size={34} color="#3baee0" />
+            </View>
+            <Text style={styles.missionRewardPopupEyebrow}>CARE TIMING</Text>
+            <Text style={styles.missionRewardPopupTitle}>お世話の目安</Text>
+            <View style={styles.careTimingCopy}>
+              <Text style={styles.careTimingBody}>おなかとヌメリは、</Text>
+              <Text style={styles.careTimingBody}>満タンから約12時間で空になります。</Text>
+              <Text style={[styles.careTimingBody, styles.careTimingBodySecond]}>ときどき様子を見て、</Text>
+              <Text style={styles.careTimingBody}>ごはんとおみずをあげよう。</Text>
+            </View>
+            <Pressable style={styles.careWarningPopupButton} onPress={() => setCareTimingInfoOpen(false)}>
+              <Text style={styles.missionRewardPopupButtonText}>わかった</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal visible={missionOpen} transparent animationType="fade" onRequestClose={() => setMissionOpen(false)}>
+        <View style={styles.missionBackdrop}>
+          <Pressable style={StyleSheet.absoluteFill} onPress={() => setMissionOpen(false)} accessibilityLabel="ミッションを閉じる" />
+          <View style={styles.missionModalCard}>
+            <View style={styles.missionModalHeader}>
+              <View>
+                <Text style={styles.missionModalEyebrow}>DAILY MISSIONS</Text>
+                <Text style={styles.missionModalTitle}>きょうのミッション</Text>
+              </View>
+              <Pressable style={styles.missionCloseIcon} onPress={() => setMissionOpen(false)} accessibilityLabel="閉じる">
+                <Ionicons name="close" size={22} color="#2d6d79" />
+              </Pressable>
+            </View>
+            <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.missionModalContent}>
+              {displayedGrowthMission && (
+                <View style={styles.missionGroupCard}>
+                  <View style={styles.missionGroupHeader}>
+                    <Ionicons name="leaf-outline" size={20} color="#3baee0" />
+                    <View style={styles.missionGroupHeading}>
+                      <Text style={styles.missionGroupTitle}>成長ミッション</Text>
+                      <Text style={styles.missionGroupSubtitle}>
+                        {availableGrowthMission ? '成長の道のりを達成しました！' : `次の目標：${displayedGrowthMission.cm}cm ${displayedGrowthMission.name}`}
+                      </Text>
+                    </View>
+                    <Text style={[styles.missionGroupStatus, availableGrowthMission && styles.missionGroupStatusReward]}>
+                      {availableGrowthMission ? '報酬あり' : '挑戦中'}
+                    </Text>
+                  </View>
+                  <View style={styles.missionTaskRow}>
+                    <Ionicons name={availableGrowthMission ? 'checkmark-circle' : 'ellipse-outline'} size={20} color={availableGrowthMission ? '#54b889' : '#9bc5bb'} />
+                    <Text style={[styles.missionTaskLabel, availableGrowthMission && styles.missionTaskLabelDone]}>
+                      {displayedGrowthMission.cm}cm　{displayedGrowthMission.name}
+                    </Text>
+                  </View>
+                  <View style={styles.missionRewardRow}>
+                    <Ionicons name={growthRewardIcon(growthMissionRewardKindForCm(displayedGrowthMission.cm))} size={17} color={growthMissionRewardKindForCm(displayedGrowthMission.cm) === 'water' ? '#3baee0' : '#d29b2e'} />
+                    <Text style={styles.missionRewardText} numberOfLines={2}>
+                      {`体長 +${growthMissionDirectPointsForCm(displayedGrowthMission.cm)}pt\n${growthRewardLabel(growthMissionRewardKindForCm(displayedGrowthMission.cm), growthMissionRewardForCm(displayedGrowthMission.cm))}`}
+                    </Text>
+                    {availableGrowthMission && (
+                      <Pressable style={styles.missionClaimButton} onPress={() => claimGrowthMission(availableGrowthMission.cm)} accessibilityLabel="成長ミッションの報酬を受け取る">
+                        <Text style={styles.missionClaimButtonText}>受け取る</Text>
+                      </Pressable>
+                    )}
+                  </View>
+                </View>
+              )}
+              <View style={styles.missionGroupCard}>
+                <View style={styles.missionGroupHeader}>
+                  <Ionicons name="restaurant-outline" size={20} color="#2f9b85" />
+                  <View style={styles.missionGroupHeading}>
+                    <Text style={styles.missionGroupTitle}>お世話ミッション</Text>
+                    <Text style={styles.missionGroupSubtitle}>ごはんとおみずを満タンにしよう</Text>
+                  </View>
+                  <Text style={[styles.missionGroupStatus, dailyCareBonusAwarded && styles.missionGroupStatusDone]}>
+                    {dailyCareBonusAwarded ? '受取済み' : dailyCareRewardAvailable ? '報酬あり' : '進行中'}
+                  </Text>
+                </View>
+                <View style={styles.missionTaskRow}>
+                  <Ionicons name={dailyFeedMissionComplete ? 'checkmark-circle' : 'ellipse-outline'} size={20} color={dailyFeedMissionComplete ? '#54b889' : '#9bc5bb'} />
+                  <Text style={[styles.missionTaskLabel, dailyFeedMissionComplete && styles.missionTaskLabelDone]}>ごはんを満タンにする</Text>
+                </View>
+                <View style={styles.missionTaskRow}>
+                  <Ionicons name={dailyWaterMissionComplete ? 'checkmark-circle' : 'ellipse-outline'} size={20} color={dailyWaterMissionComplete ? '#54b889' : '#9bc5bb'} />
+                  <Text style={[styles.missionTaskLabel, dailyWaterMissionComplete && styles.missionTaskLabelDone]}>おみずを満タンにする</Text>
+                </View>
+                <View style={styles.missionRewardRow}>
+                  <Ionicons name="sparkles" size={17} color="#d29b2e" />
+                  <Text style={styles.missionRewardText}>報酬：体長 +1pt</Text>
+                  {dailyCareRewardAvailable && (
+                    <Pressable style={styles.missionClaimButton} onPress={claimDailyMissionReward} accessibilityLabel="お世話ミッションの報酬を受け取る">
+                      <Text style={styles.missionClaimButtonText}>受け取る</Text>
+                    </Pressable>
+                  )}
+                </View>
+              </View>
+
+              <View style={styles.missionGroupCard}>
+                <View style={styles.missionGroupHeader}>
+                  <Ionicons name="heart-outline" size={20} color="#e77d97" />
+                  <View style={styles.missionGroupHeading}>
+                    <Text style={styles.missionGroupTitle}>なかよしミッション</Text>
+                    <Text style={styles.missionGroupSubtitle}>満タンでごほうびなでなでをもらおう</Text>
+                  </View>
+                  <Text style={[styles.missionGroupStatus, dailyPetBonusClaimed && styles.missionGroupStatusDone]}>
+                    {dailyPetBonusUsed ? '受取済み' : dailyPetBonusClaimed ? '受取済み' : dailyPetMissionComplete ? '報酬あり' : '進行中'}
+                  </Text>
+                </View>
+                <View style={styles.missionTaskRow}>
+                  <Ionicons name={dailyPetMissionComplete ? 'checkmark-circle' : 'ellipse-outline'} size={20} color={dailyPetMissionComplete ? '#e77d97' : '#dcb3c0'} />
+                  <Text style={[styles.missionTaskLabel, dailyPetMissionComplete && styles.missionTaskLabelDone]}>きょうのなでなでを満タンにしよう</Text>
+                </View>
+                <View style={styles.missionRewardRow}>
+                  <Ionicons name={dailyPetBonusClaimed ? 'checkmark-circle' : 'heart'} size={17} color={dailyPetBonusClaimed ? '#54b889' : '#e77d97'} />
+                  <Text style={styles.missionRewardText}>
+                    {dailyPetBonusUsed ? '報酬：ごほうびなでなで 受取済み' : dailyPetBonusClaimed ? `報酬：ごほうびなでなで 残り${petBonusUsesRemaining}回` : dailyPetMissionComplete ? '報酬：ごほうびなでなで 3回！' : '報酬：ごほうびなでなで +3回'}
+                  </Text>
+                  {petRewardAvailable && (
+                    <Pressable style={styles.missionClaimButton} onPress={claimDailyPetMission} accessibilityLabel="なかよしミッションの報酬を受け取る">
+                      <Text style={styles.missionClaimButtonText}>受け取る</Text>
+                    </Pressable>
+                  )}
+                </View>
+              </View>
+
+              <Text style={styles.missionModalNote}>これから増えるミッションも、種類ごとにここへ追加されます。</Text>
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal visible={dailyMissionRewardPopup !== null} transparent animationType="fade" onRequestClose={() => setDailyMissionRewardPopup(null)}>
+        {dailyMissionRewardPopup && (
+          <View style={styles.missionRewardBackdrop}>
+            <View style={styles.missionRewardPopupCard}>
+              <View style={styles.missionRewardPopupIcon}>
+                <Ionicons name={dailyMissionRewardPopup.kind === 'pet' ? 'heart' : dailyMissionRewardPopup.kind === 'growth' ? growthRewardIcon(dailyMissionRewardPopup.reward ?? 'none') : 'sparkles'} size={34} color={dailyMissionRewardPopup.kind === 'pet' ? '#e77d97' : dailyMissionRewardPopup.kind === 'growth' && dailyMissionRewardPopup.reward === 'water' ? '#3baee0' : '#d49c26'} />
+              </View>
+              <Text style={styles.missionRewardPopupEyebrow}>MISSION COMPLETE!</Text>
+              <Text style={styles.missionRewardPopupTitle}>{dailyMissionRewardPopup.kind === 'pet' ? 'なかよしミッション達成！' : dailyMissionRewardPopup.kind === 'growth' ? '成長ミッション達成！' : 'お世話ミッション達成！'}</Text>
+              <Text style={styles.missionRewardPopupBody}>{dailyMissionRewardPopup.kind === 'pet' ? 'ごほうびなでなでを受け取りました' : dailyMissionRewardPopup.kind === 'growth' ? 'ごほうびのお世話を受け取りました' : '体長ポイントを受け取りました'}</Text>
+              <Text style={styles.missionRewardPopupPoint}>
+                {dailyMissionRewardPopup.kind === 'pet'
+                  ? 'ごほうびなでなで +3回'
+                  : dailyMissionRewardPopup.kind === 'growth'
+                    ? `体長 +${dailyMissionRewardPopup.directPoints ?? 0}pt\n${growthRewardLabel(dailyMissionRewardPopup.reward ?? 'none', dailyMissionRewardPopup.amount ?? 3)}`
+                    : '体長 +1pt'}
+              </Text>
+              <Pressable style={styles.missionRewardPopupButton} onPress={() => setDailyMissionRewardPopup(null)}>
+                <Text style={styles.missionRewardPopupButtonText}>やった！</Text>
+              </Pressable>
+            </View>
+          </View>
+        )}
+      </Modal>
+
+      <Modal
+        visible={growthStageNotice != null}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setGrowthStageNotice(null)}
+      >
+        {growthStageNotice && <View style={styles.growthStageUpBackdrop}>
+          <View style={styles.growthStageUpCard}>
+            <Text style={styles.growthStageUpEyebrow}>体長 {growthStageNotice.cm}cm 到達！</Text>
+            <Text style={styles.growthStageUpTitle}>成長したよ！</Text>
+            <ExpoImage
+              source={
+                growthStageNotice.cm >= ADULT_OOSAN_MIN_LENGTH_CM
+                  ? ADULT_WALK_FRAMES[0]
+                  : require('./assets/images/sansyo_toka2.gif')
+              }
+              style={styles.growthStageUpImage}
+              contentFit="contain"
+            />
+            <Text style={styles.growthStageUpName}>{growthStageNotice.name}</Text>
+            <Text style={styles.growthStageUpBody}>ひとまわり大きくなりました。</Text>
+            <Pressable style={styles.growthStageUpButton} onPress={() => setGrowthStageNotice(null)}>
+              <Text style={styles.growthStageUpButtonText}>これからも育てる</Text>
+            </Pressable>
+          </View>
+        </View>}
+      </Modal>
+
+      <Modal
+        visible={growthLengthUp != null}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setGrowthLengthUp(null)}
+      >
+        {growthLengthUp && <View style={styles.growthStageUpBackdrop}>
+          <View style={styles.growthLevelUpCard}>
+            <Text style={styles.growthStageUpEyebrow}>育成レベルアップ！</Text>
+            <Text style={styles.growthStageUpTitle}>体長 {growthLengthUp.cm}cm になった！</Text>
+            <ExpoImage
+              source={
+                growthLengthUp.bodyLengthCm >= ADULT_OOSAN_MIN_LENGTH_CM
+                  ? ADULT_WALK_FRAMES[0]
+                  : require('./assets/images/sansyo_toka2.gif')
+              }
+              style={styles.growthLevelUpImage}
+              contentFit="contain"
+            />
+            <Text style={styles.growthStageUpBody}>オオサンショウウオが、少し大きくなりました。</Text>
+            <Pressable style={styles.growthStageUpButton} onPress={() => setGrowthLengthUp(null)}>
+              <Text style={styles.growthStageUpButtonText}>これからも育てる</Text>
+            </Pressable>
+          </View>
+        </View>}
+      </Modal>
+
+      <Modal
+        visible={adultEvolutionOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setAdultEvolutionOpen(false)}
+      >
+        <View style={styles.adultEvolutionBackdrop}>
+          <View style={styles.adultEvolutionCard}>
+            <Text style={styles.adultEvolutionEyebrow}>体長 20cm 達成！</Text>
+            <Text style={styles.adultEvolutionTitle}>おとなの姿になった！</Text>
+            <ExpoImage
+              source={ADULT_WALK_FRAMES[0]}
+              style={styles.adultEvolutionImage}
+              contentFit="contain"
+            />
+            <Text style={styles.adultEvolutionBody}>
+              これからは、りっぱなオオサンショウウオとして{`\n`}ゆっくり大きくなっていきます。
+            </Text>
+            <Pressable style={styles.adultEvolutionButton} onPress={() => setAdultEvolutionOpen(false)}>
+              <Text style={styles.adultEvolutionButtonText}>これからも育てる</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal
+        visible={affectionLevelUp != null}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setAffectionLevelUp(null)}
+      >
+        {affectionLevelUp && <View style={styles.affectionLevelUpBackdrop}>
+          <View style={styles.affectionLevelUpCard}>
+            <Text style={styles.affectionLevelUpEyebrow}>なつき度アップ！</Text>
+            <Text style={styles.affectionLevelUpHearts}>♥</Text>
+            <Text style={styles.affectionLevelUpTitle}>なつきLv.{affectionLevelUp.level} になった！</Text>
+            <Text style={styles.affectionLevelUpName}>{affectionLevelUp.name}</Text>
+            <Text style={styles.affectionLevelUpBody}>なでてもらえて、もっと仲良くなれたよ。</Text>
+            <Pressable style={styles.affectionLevelUpButton} onPress={() => setAffectionLevelUp(null)}>
+              <Text style={styles.affectionLevelUpButtonText}>これからもなでる</Text>
+            </Pressable>
+          </View>
+        </View>}
+      </Modal>
 
       {sparkleActive && celebrationItem?.tier === 'low' && (
         <SparkleOverlay
@@ -1566,12 +2947,12 @@ const AppMain: React.FC = () => {
         transparent
         animationType="fade"
       >
-        <View style={styles.modalBackdrop}>
+        {celebrationItem && <View style={styles.modalBackdrop}>
           <View style={styles.modalCard}>
             <Text style={styles.modalTitle}>達成！</Text>
-            <Text style={styles.modalCelebrateName}>{celebrationItem?.name}</Text>
+            <Text style={styles.modalCelebrateName}>{celebrationItem.name}</Text>
             <Text style={styles.modalBody}>
-              {celebrationItem?.tier === 'high'
+              {celebrationItem.tier === 'high'
                 ? '大きな一歩だね。これからも一緒に川を泳ごう。'
                 : '順調に育っているよ。'}
             </Text>
@@ -1585,13 +2966,17 @@ const AppMain: React.FC = () => {
               <Text style={styles.modalButtonLabel}>よし！</Text>
             </Pressable>
           </View>
-        </View>
+        </View>}
       </Modal>
 
       <DebugOverlay
         onApplyBodyLengthCm={applyDebugBodyLengthCm}
+        onApplyAffection={applyDebugAffection}
+        onResetPetCount={resetDebugPetCount}
+        onResetDailyMissions={resetDebugDailyMissions}
         onApplyGauges={applyDebugGauges}
         onSetDead={applyDebugDeadState}
+        onSendCareAlert={() => void notifyCareEmptyNow()}
         onSendInactivityReminder={() => void notifyInactivityReminderNow()}
         onSendThirtyDayReminder={() => void notifyThirtyDayReminderNow()}
       />
@@ -1609,10 +2994,10 @@ const styles = StyleSheet.create({
   appRoot: {
     flex: 1,
   },
-  /** DebugOverlay の FAB は left: 62（10+44+8）で隣接 */
+  /** 右上: インフォメーション。DebugOverlay の FAB は right: 62 で隣接 */
   legalFab: {
     position: 'absolute',
-    left: 10,
+    right: 10,
     top: Platform.OS === 'ios' ? 56 : 52,
     width: 44,
     height: 44,
@@ -1622,6 +3007,261 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     zIndex: 360,
     elevation: 18,
+  },
+  /** ミッションは情報HUDから分離し、オオサンより上の独立レイヤーへ置く。 */
+  missionFloatingButton: {
+    position: 'absolute',
+    right: 16,
+    // セリフ帯とは離しつつ、上へ行きすぎない中間の高さに置く。
+    bottom: Platform.select({ ios: 406, android: 374, default: 366 }),
+    width: 76,
+    height: 82,
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 530,
+    elevation: 60,
+  },
+  missionLogIconCircle: {
+    width: 54,
+    height: 54,
+    borderRadius: 27,
+    backgroundColor: 'rgba(33, 150, 243, 0.88)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.5)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  missionFabDot: {
+    position: 'absolute',
+    top: 3,
+    right: 2,
+    width: 9,
+    height: 9,
+    borderRadius: 5,
+    backgroundColor: '#ffcc80',
+    borderWidth: 1,
+    borderColor: '#fff1c9',
+  },
+  missionLogLabel: { marginTop: 2, color: 'rgba(255,255,255,0.96)', fontSize: 9, fontWeight: '900', textShadowColor: 'rgba(0,0,0,0.5)', textShadowOffset: { width: 0, height: 1 }, textShadowRadius: 2 },
+  missionBackdrop: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 20, backgroundColor: 'rgba(4, 31, 42, 0.62)' },
+  missionModalCard: { width: '100%', maxWidth: 390, maxHeight: '78%', borderRadius: 22, overflow: 'hidden', backgroundColor: '#f5fffb', shadowColor: '#000', shadowOpacity: 0.3, shadowRadius: 14, shadowOffset: { width: 0, height: 6 }, elevation: 20 },
+  missionModalHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 19, paddingTop: 18, paddingBottom: 14, backgroundColor: '#d9f4e9' },
+  missionModalEyebrow: { color: '#3d9a83', fontSize: 10, fontWeight: '900', letterSpacing: 1.2 },
+  missionModalTitle: { marginTop: 2, color: '#1e655d', fontSize: 22, fontWeight: '900' },
+  missionCloseIcon: { width: 34, height: 34, alignItems: 'center', justifyContent: 'center', borderRadius: 17, backgroundColor: 'rgba(255,255,255,0.76)' },
+  missionModalContent: { padding: 15, paddingBottom: 20 },
+  missionGroupCard: { padding: 14, borderRadius: 16, backgroundColor: '#ffffff', borderWidth: 1, borderColor: '#d9eee7', marginBottom: 12 },
+  missionGroupHeader: { flexDirection: 'row', alignItems: 'center', marginBottom: 10 },
+  missionGroupHeading: { flex: 1, marginLeft: 8 },
+  missionGroupTitle: { color: '#245f59', fontSize: 16, fontWeight: '900' },
+  missionGroupSubtitle: { marginTop: 1, color: '#6f9189', fontSize: 11, fontWeight: '600' },
+  missionGroupStatus: { paddingHorizontal: 8, paddingVertical: 4, borderRadius: 9, overflow: 'hidden', color: '#5f8f84', backgroundColor: '#e8f6f1', fontSize: 10, fontWeight: '900' },
+  missionGroupStatusDone: { color: '#23795d', backgroundColor: '#d6f4e5' },
+  missionGroupStatusReward: { color: '#a26919', backgroundColor: '#fff0c9' },
+  missionTaskRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 6 },
+  missionTaskLabel: { marginLeft: 8, color: '#50746d', fontSize: 14, fontWeight: '700' },
+  missionTaskLabelDone: { color: '#359572', textDecorationLine: 'line-through' },
+  missionRewardRow: { flexDirection: 'row', alignItems: 'center', marginTop: 8, paddingTop: 9, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: '#dceee8' },
+  missionRewardText: { flex: 1, flexShrink: 1, marginLeft: 6, color: '#98762c', fontSize: 12, lineHeight: 17, fontWeight: '900' },
+  missionClaimButton: { marginLeft: 'auto', paddingHorizontal: 11, paddingVertical: 7, borderRadius: 11, backgroundColor: '#32a887' },
+  missionClaimButtonText: { color: '#fff', fontSize: 12, fontWeight: '900' },
+  missionModalNote: { color: '#75958d', fontSize: 11, lineHeight: 17, textAlign: 'center', paddingHorizontal: 8, marginTop: 2 },
+  missionRewardBackdrop: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 22, backgroundColor: 'rgba(6, 38, 47, 0.68)' },
+  missionRewardPopupCard: { width: '100%', maxWidth: 350, alignItems: 'center', borderRadius: 24, paddingHorizontal: 22, paddingTop: 25, paddingBottom: 20, backgroundColor: '#f6fffb', borderWidth: 2, borderColor: '#a9e3cb', shadowColor: '#000', shadowOpacity: 0.3, shadowRadius: 14, shadowOffset: { width: 0, height: 6 }, elevation: 22 },
+  missionRewardPopupIcon: { width: 68, height: 68, borderRadius: 34, alignItems: 'center', justifyContent: 'center', backgroundColor: '#fff2c5' },
+  missionRewardPopupEyebrow: { marginTop: 14, color: '#43a887', fontSize: 11, fontWeight: '900', letterSpacing: 1.2 },
+  missionRewardPopupTitle: { marginTop: 5, color: '#276b60', fontSize: 22, fontWeight: '900', textAlign: 'center' },
+  missionRewardPopupBody: { marginTop: 11, color: '#5e8179', fontSize: 13, textAlign: 'center' },
+  missionRewardPopupPoint: { marginTop: 5, color: '#c5891c', fontSize: 20, lineHeight: 27, fontWeight: '900', textAlign: 'center' },
+  missionRewardPopupButton: { alignSelf: 'stretch', marginTop: 18, borderRadius: 14, paddingVertical: 13, backgroundColor: '#32a887' },
+  missionRewardPopupButtonText: { color: '#fff', fontSize: 16, fontWeight: '900', textAlign: 'center' },
+  restartConfirmActions: { alignSelf: 'stretch', flexDirection: 'row', gap: 9, marginTop: 18 },
+  restartConfirmCancel: { flex: 1, alignItems: 'center', justifyContent: 'center', borderRadius: 14, paddingVertical: 13, backgroundColor: '#e6f0ed' },
+  restartConfirmCancelText: { color: '#52766d', fontSize: 15, fontWeight: '900' },
+  restartConfirmStart: { flex: 1.2, alignItems: 'center', justifyContent: 'center', borderRadius: 14, paddingVertical: 13, backgroundColor: '#32a887' },
+  newOosanGuideCard: { borderColor: '#93d6ee' },
+  nameModalKeyboardAvoider: { flex: 1 },
+  nameModalBackdrop: { justifyContent: 'flex-start', paddingTop: Platform.OS === 'ios' ? 58 : 42, paddingBottom: 16 },
+  nameEntryPopupCard: { paddingTop: 43 },
+  nameModalCloseButton: { position: 'absolute', top: 10, left: 10, width: 34, height: 34, borderRadius: 17, alignItems: 'center', justifyContent: 'center', backgroundColor: '#e6f0ed', zIndex: 2 },
+  newOosanGuideImage: { width: '100%', height: 118, marginTop: 0, marginBottom: 0 },
+  nameInput: { alignSelf: 'stretch', marginTop: 16, borderRadius: 12, paddingHorizontal: 14, paddingVertical: 11, color: '#276b60', fontSize: 18, fontWeight: '800', textAlign: 'center', backgroundColor: '#eef9f5', borderWidth: 1.5, borderColor: '#8bd4bb' },
+  careWarningPopupCard: { borderColor: '#f0cf8e' },
+  careWarningPopupIcon: { width: 68, height: 68, borderRadius: 34, alignItems: 'center', justifyContent: 'center', backgroundColor: '#fff2c5' },
+  careWarningEyebrow: { marginTop: 14, color: '#b97a22', fontSize: 11, fontWeight: '900', letterSpacing: 1.2 },
+  careWarningTitle: { marginTop: 5, color: '#8b591c', fontSize: 21, fontWeight: '900', textAlign: 'center' },
+  careWarningBody: { marginTop: 12, color: '#6e6653', fontSize: 13, lineHeight: 20, textAlign: 'center' },
+  careTimingCopy: { marginTop: 12, alignItems: 'center' },
+  careTimingBody: { color: '#6e6653', fontSize: 13, lineHeight: 20, textAlign: 'center' },
+  careTimingBodySecond: { marginTop: 10 },
+  careWarningPopupButton: { alignSelf: 'stretch', marginTop: 18, borderRadius: 14, paddingVertical: 13, backgroundColor: '#d59a32' },
+  // 見た目より少し広く、オオサンショウウオ本体をつかみやすくする。
+  oosanTouchArea: { padding: 12, margin: -12 },
+  levelOrbHitArea: {
+    position: 'absolute',
+    top: Platform.OS === 'ios' ? 54 : 42,
+    left: '50%',
+    marginLeft: -42,
+    width: 84,
+    height: 84,
+    // 体長ボタンはオオサンより手前で常にタップできる。
+    zIndex: 520,
+    elevation: 55,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  levelOrb: {
+    width: 82,
+    height: 82,
+    borderRadius: 41,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(228, 248, 255, 0.9)',
+    borderWidth: 1,
+    borderColor: 'rgba(66, 183, 233, 0.7)',
+    shadowColor: '#000',
+    shadowOpacity: 0.26,
+    shadowRadius: 5,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 9,
+  },
+  levelOrbSegment: {
+    position: 'absolute',
+    width: 3,
+    height: 7,
+    borderRadius: 2,
+  },
+  levelOrbLabel: {
+    color: '#176d99',
+    fontSize: 10,
+    fontWeight: '800',
+    lineHeight: 11,
+  },
+  levelOrbValue: {
+    color: '#126e9f',
+    fontSize: 23,
+    fontWeight: '900',
+    lineHeight: 25,
+    fontVariant: ['tabular-nums'],
+  },
+  levelOrbUnit: {
+    color: '#277ca7',
+    fontSize: 10,
+    fontWeight: '800',
+    lineHeight: 10,
+    marginTop: -2,
+  },
+  levelOrbPoints: {
+    color: '#277ca7',
+    fontSize: 9,
+    fontWeight: '700',
+    lineHeight: 11,
+    fontVariant: ['tabular-nums'],
+  },
+  levelOrbChargeFlash: {
+    position: 'absolute',
+    width: 96,
+    height: 96,
+    borderRadius: 48,
+    borderWidth: 4,
+    borderColor: 'rgba(103, 220, 255, 0.96)',
+    backgroundColor: 'rgba(137, 230, 255, 0.24)',
+  },
+  growthPointFlight: {
+    position: 'absolute',
+    zIndex: 90,
+    elevation: 30,
+    minWidth: 86,
+    paddingHorizontal: 9,
+    paddingVertical: 6,
+    borderRadius: 14,
+    backgroundColor: 'rgba(245, 253, 255, 0.97)',
+    borderWidth: 2,
+    borderColor: '#5bc6ef',
+    shadowColor: '#063b52',
+    shadowOpacity: 0.35,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 2 },
+  },
+  growthPointFlightText: {
+    color: '#0c82b4',
+    fontSize: 14,
+    fontWeight: '900',
+    textAlign: 'center',
+    fontVariant: ['tabular-nums'],
+  },
+  phaseBadge: {
+    position: 'absolute',
+    // 右上の情報（設定）ボタンの直下。名前・昼夜表示と重ならない位置にする.
+    top: Platform.OS === 'ios' ? 112 : 104,
+    right: 10,
+    zIndex: 9,
+    borderRadius: 16,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    backgroundColor: 'rgba(16, 81, 109, 0.48)',
+    borderWidth: 1,
+    borderColor: 'rgba(230, 250, 255, 0.55)',
+  },
+  phaseBadgeText: {
+    color: '#effbff',
+    fontSize: 12,
+    fontWeight: '800',
+    letterSpacing: 0.4,
+  },
+  nameBadge: {
+    position: 'absolute',
+    top: Platform.OS === 'ios' ? 88 : 76,
+    left: 14,
+    zIndex: 520,
+    elevation: 55,
+    maxWidth: 134,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    borderRadius: 16,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    backgroundColor: 'rgba(16, 81, 109, 0.48)',
+    borderWidth: 1,
+    borderColor: 'rgba(230, 250, 255, 0.55)',
+  },
+  nameBadgeText: {
+    flexShrink: 1,
+    color: '#effbff',
+    fontSize: 12,
+    fontWeight: '800',
+    letterSpacing: 0.4,
+  },
+  growthStageNotice: {
+    position: 'absolute',
+    top: Platform.OS === 'ios' ? 156 : 142,
+    left: 26,
+    right: 26,
+    zIndex: 45,
+    alignItems: 'center',
+    borderRadius: 18,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    backgroundColor: 'rgba(238, 251, 255, 0.94)',
+    borderWidth: 1,
+    borderColor: 'rgba(74, 184, 225, 0.78)',
+    shadowColor: '#000',
+    shadowOpacity: 0.22,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 12,
+  },
+  growthStageNoticeLength: {
+    color: '#2788b5',
+    fontSize: 13,
+    fontWeight: '900',
+  },
+  growthStageNoticeName: {
+    marginTop: 1,
+    color: '#225d76',
+    fontSize: 20,
+    fontWeight: '900',
   },
   scrollContainer: {
     flex: 1,
@@ -1753,6 +3393,104 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     marginBottom: 8,
   },
+  guideInfoButton: {
+    paddingLeft: 7,
+    paddingRight: 1,
+    paddingTop: 1,
+  },
+  growthLevelText: {
+    marginTop: 8,
+    paddingTop: 7,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: 'rgba(255, 255, 255, 0.22)',
+    color: '#e9fbf5',
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  growthProgressText: {
+    marginTop: 3,
+    color: '#cce9e1',
+    fontSize: 12,
+    fontVariant: ['tabular-nums'],
+  },
+  growthCareHint: {
+    marginTop: 3,
+    color: '#b7dfd4',
+    fontSize: 10,
+    fontWeight: '600',
+  },
+  affectionBlock: {
+    paddingVertical: 9,
+    paddingHorizontal: 12,
+    marginBottom: 8,
+  },
+  affectionHeader: { flexDirection: 'row', alignItems: 'center' },
+  affectionLabel: {
+    color: '#ffe8ee',
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  affectionLevelText: {
+    flex: 1,
+    color: '#ffe0e8',
+    fontSize: 11,
+    fontWeight: '800',
+    textAlign: 'right',
+    fontVariant: ['tabular-nums'],
+  },
+  affectionHeartsRow: {
+    marginTop: 6,
+    flexDirection: 'row',
+    alignItems: 'center',
+    minHeight: 29,
+  },
+  affectionHeartCarry: {
+    marginRight: 5,
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    borderRadius: 10,
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+  },
+  affectionHeartCarryText: { fontSize: 14, fontWeight: '900', fontVariant: ['tabular-nums'] },
+  affectionHeartSet: { flexShrink: 1, color: '#ff8ca7', fontSize: 17, letterSpacing: 0.3 },
+  affectionProgressRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 5,
+  },
+  affectionProgressTrack: {
+    flex: 1,
+    height: 7,
+    borderRadius: 5,
+    overflow: 'hidden',
+    backgroundColor: 'rgba(0, 0, 0, 0.22)',
+    marginRight: 8,
+  },
+  affectionProgressFill: {
+    height: '100%',
+    borderRadius: 5,
+  },
+  affectionGaugeFullEffect: {
+    position: 'absolute',
+    left: 0,
+    top: 0,
+    bottom: 0,
+    borderRadius: 5,
+    opacity: 0.62,
+  },
+  affectionProgressText: {
+    width: 116,
+    color: '#f7dbe2',
+    fontSize: 10,
+    fontWeight: '700',
+    textAlign: 'right',
+    fontVariant: ['tabular-nums'],
+  },
+  affectionHint: {
+    marginTop: 2,
+    color: '#efd9df',
+    fontSize: 11,
+  },
   growthMultHint: {
     marginTop: 8,
     paddingTop: 6,
@@ -1877,19 +3615,19 @@ const styles = StyleSheet.create({
     fontWeight: '800',
   },
   nightVeil: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     backgroundColor: '#1a1a2e',
     zIndex: 1,
   },
   /** タップ波紋：オオサン（14）より手前（反応が分かりやすい） */
   tapRippleLayer: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     zIndex: 18,
   },
   moonBadge: {
     position: 'absolute',
     top: Platform.OS === 'ios' ? 52 : 40,
-    right: 14,
+    left: 14,
     zIndex: 9,
     flexDirection: 'row',
     alignItems: 'center',
@@ -1903,14 +3641,14 @@ const styles = StyleSheet.create({
   moonBadgeLabel: {
     marginLeft: 6,
     color: 'rgba(230, 240, 255, 0.95)',
-    fontSize: 13,
+    fontSize: 12,
     fontWeight: '800',
     letterSpacing: 0.5,
   },
   sunBadge: {
     position: 'absolute',
     top: Platform.OS === 'ios' ? 52 : 40,
-    right: 14,
+    left: 14,
     zIndex: 9,
     flexDirection: 'row',
     alignItems: 'center',
@@ -1924,14 +3662,14 @@ const styles = StyleSheet.create({
   sunBadgeLabel: {
     marginLeft: 6,
     color: 'rgba(60, 40, 10, 0.92)',
-    fontSize: 13,
+    fontSize: 12,
     fontWeight: '800',
     letterSpacing: 0.5,
   },
   dayBadge: {
     position: 'absolute',
     top: Platform.OS === 'ios' ? 52 : 40,
-    right: 14,
+    left: 14,
     zIndex: 9,
     flexDirection: 'row',
     alignItems: 'center',
@@ -1945,27 +3683,37 @@ const styles = StyleSheet.create({
   dayBadgeLabel: {
     marginLeft: 6,
     color: 'rgba(10, 45, 65, 0.98)',
-    fontSize: 13,
+    fontSize: 12,
     fontWeight: '800',
     letterSpacing: 0.5,
     textShadowColor: 'rgba(255, 255, 255, 0.35)',
     textShadowOffset: { width: 0, height: 0.5 },
     textShadowRadius: 1,
   },
-  /** 下部 HUD・オオサンより奥で、操作は透過 */
+  /** お世話演出の落下パーティクル（操作は透過） */
   fallingParticleOverlay: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     zIndex: 8,
     overflow: 'visible',
   },
-  bottomStack: {
+  /** 情報表示はオオサンより奥。操作ボタンぶんだけ上へずらし、従来の位置を保つ。 */
+  bottomInfoStack: {
     position: 'absolute',
     left: 10,
     right: 10,
-    // iPhone のホームインジケータ・システムジェスチャと Feed/Water が被らないよう余白を多めに
-    bottom: Platform.select({ ios: 52, android: 20, default: 12 }),
+    // 下部操作列（約71px）の上。これによりHUDの画面上の位置は従来と変わらない。
+    bottom: Platform.select({ ios: 123, android: 91, default: 83 }),
     zIndex: 12,
     elevation: 10,
+  },
+  /** ごはん／おみず／なでるは、オオサン本体（450）より必ず手前。 */
+  bottomActionStack: {
+    position: 'absolute',
+    left: 10,
+    right: 10,
+    bottom: Platform.select({ ios: 52, android: 20, default: 12 }),
+    zIndex: 500,
+    elevation: 50,
   },
   deadState: {
     alignItems: 'center',
@@ -2020,14 +3768,35 @@ const styles = StyleSheet.create({
   dailyLogStrip: {
     width: '100%',
     alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: 54,
     marginBottom: 8,
-    paddingHorizontal: 16,
+    paddingLeft: 16,
+    paddingRight: 16,
     paddingVertical: 8,
     borderRadius: 14,
     backgroundColor: 'rgba(0, 0, 0, 0.14)',
     borderWidth: 1,
     borderColor: 'rgba(255, 255, 255, 0.18)',
   },
+  dailyMissionCard: {
+    width: '100%',
+    marginBottom: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    borderRadius: 14,
+    backgroundColor: 'rgba(12, 67, 80, 0.58)',
+    borderWidth: 1,
+    borderColor: 'rgba(162, 234, 210, 0.32)',
+  },
+  dailyMissionHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 },
+  dailyMissionTitle: { color: '#e4fff3', fontSize: 13, fontWeight: '900' },
+  dailyMissionReward: { color: '#c8f1df', fontSize: 11, fontWeight: '800' },
+  dailyMissionRewardDone: { color: '#ffe38a' },
+  dailyMissionTasks: { flexDirection: 'row', justifyContent: 'space-between' },
+  dailyMissionTask: { flexDirection: 'row', alignItems: 'center', flex: 1 },
+  dailyMissionTaskText: { marginLeft: 3, color: '#d9efeb', fontSize: 10, fontWeight: '700' },
+  dailyMissionTaskDone: { color: '#8be2bb' },
   gaugeBlock: {
     paddingVertical: 10,
     paddingHorizontal: 12,
@@ -2035,8 +3804,8 @@ const styles = StyleSheet.create({
   },
   gaugeRow: {
     flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 8,
+    alignItems: 'flex-start',
+    marginBottom: 11,
   },
   gaugeRowLast: {
     marginBottom: 0,
@@ -2045,6 +3814,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     width: 82,
+    paddingTop: 1,
   },
   gaugeLabel: {
     width: 82,
@@ -2067,14 +3837,19 @@ const styles = StyleSheet.create({
   viscosityWarnIcon: {
     marginLeft: 2,
   },
+  /** 白い i は常設の説明、少し離した黄色 ! は今の残量への注意として見分ける。 */
+  gaugeInfoIcon: {
+    marginLeft: 2,
+  },
+  gaugeWarningButton: {
+    marginLeft: 7,
+  },
   gaugeTrack: {
     flex: 1,
-    height: 10,
-    borderRadius: 6,
-    backgroundColor: 'rgba(0, 0, 0, 0.22)',
-    overflow: 'hidden',
+    height: 25,
     marginHorizontal: 8,
   },
+  gaugeBarBackground: { height: 10, borderRadius: 6, backgroundColor: 'rgba(0, 0, 0, 0.22)', overflow: 'hidden' },
   gaugeFill: {
     height: '100%',
     borderRadius: 6,
@@ -2082,8 +3857,14 @@ const styles = StyleSheet.create({
   gaugeFillViscosity: {
     backgroundColor: 'rgba(33, 150, 243, 0.88)',
   },
+  gaugeDivider: { position: 'absolute', top: 0, bottom: 0, width: 1, backgroundColor: 'rgba(255,255,255,0.72)' },
+  gaugeDividerFirst: { left: '33.333%' },
+  gaugeDividerSecond: { left: '66.666%' },
+  gaugeRewardScale: { flexDirection: 'row', marginTop: 2 },
+  gaugeRewardLabel: { flex: 1, color: 'rgba(222, 244, 240, 0.78)', fontSize: 9, fontWeight: '800', textAlign: 'center', fontVariant: ['tabular-nums'] },
   gaugePct: {
     width: 38,
+    paddingTop: 1,
     textAlign: 'right',
     color: '#d2f5ec',
     fontSize: 11,
@@ -2098,28 +3879,134 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     paddingBottom: Platform.select({ ios: 4, default: 0 }),
   },
+  actionItem: {
+    flex: 1,
+    alignItems: 'stretch',
+  },
+  actionItemFeed: {
+    marginRight: 6,
+  },
+  actionItemWater: {
+    marginHorizontal: 3,
+  },
+  actionItemPet: {
+    marginLeft: 6,
+  },
   actionBtn: {
     paddingVertical: 12,
-    paddingHorizontal: 28,
+    paddingHorizontal: 10,
     borderRadius: 14,
-    minWidth: 120,
     alignItems: 'center',
     borderWidth: 1,
     borderColor: 'rgba(255, 255, 255, 0.2)',
   },
   actionBtnFeed: {
     backgroundColor: 'rgba(76, 175, 80, 0.88)',
-    marginRight: 6,
   },
   actionBtnWater: {
     backgroundColor: 'rgba(33, 150, 243, 0.88)',
-    marginLeft: 6,
+  },
+  actionBtnBonus: {
+    borderWidth: 3,
+    borderColor: '#f5cf5d',
+    shadowColor: '#f5cf5d',
+    shadowOpacity: 0.7,
+    shadowRadius: 7,
+    shadowOffset: { width: 0, height: 0 },
+    elevation: 5,
+  },
+  actionBtnFeedNoPoint: {
+    backgroundColor: 'rgba(109, 151, 113, 0.72)',
+    borderColor: 'rgba(224, 244, 226, 0.5)',
+  },
+  actionBtnWaterNoPoint: {
+    backgroundColor: 'rgba(101, 145, 178, 0.72)',
+    borderColor: 'rgba(224, 234, 236, 0.52)',
+  },
+  actionBtnPet: {
+    backgroundColor: 'rgba(232, 100, 137, 0.9)',
+  },
+  bonusPetSparkleLeft: { position: 'absolute', top: 5, left: 8, opacity: 0.95 },
+  bonusPetSparkleRight: { position: 'absolute', bottom: 5, right: 8, opacity: 0.95 },
+  /** 上限後も反応はするが、今日はなつきが増えないことを淡いピンクで示す。 */
+  actionBtnPetResting: {
+    backgroundColor: 'rgba(222, 151, 171, 0.68)',
+    borderColor: 'rgba(255, 235, 241, 0.62)',
   },
   actionBtnText: {
     color: '#fff',
     fontSize: 15,
     fontWeight: '800',
     letterSpacing: 0.5,
+  },
+  actionBtnTextBonus: {
+    fontSize: 12,
+    letterSpacing: 0,
+  },
+  actionBtnTextNoPoint: {
+    color: '#edf4f5',
+  },
+  actionPointSlot: {
+    height: 25,
+    paddingTop: 3,
+    alignItems: 'center',
+    paddingHorizontal: 1,
+  },
+  actionPointHint: {
+    minWidth: 48,
+    maxWidth: '100%',
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 9,
+    backgroundColor: 'rgba(255, 255, 255, 0.92)',
+    color: '#1685b6',
+    fontSize: 13,
+    lineHeight: 16,
+    fontWeight: '900',
+    textAlign: 'center',
+  },
+  actionPointHintBonus: {
+    color: '#aa7814',
+    borderWidth: 1,
+    borderColor: '#efd077',
+  },
+  actionPointHintNoPoint: {
+    color: '#708088',
+    backgroundColor: 'rgba(236, 241, 242, 0.94)',
+  },
+  bonusWaterParticle: {
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  bonusWaterSparkle: {
+    position: 'absolute',
+    right: -5,
+    top: -7,
+    color: '#ffe67d',
+    fontSize: 15,
+    fontWeight: '900',
+  },
+  bonusPetParticle: {
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  bonusPetFallingHeart: {
+    color: '#f2b938',
+    fontWeight: '900',
+    textShadowColor: 'rgba(255, 250, 204, 0.96)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 3,
+  },
+  bonusPetFallingSparkle: {
+    position: 'absolute',
+    right: -6,
+    top: -9,
+    color: '#fff3a0',
+    fontSize: 16,
+    fontWeight: '900',
+  },
+  actionPointHintHidden: {
+    opacity: 0,
   },
   riverBackground: {
     position: 'absolute',
@@ -2134,8 +4021,9 @@ const styles = StyleSheet.create({
     right: 0,
     alignItems: 'center',
     justifyContent: 'center',
-    zIndex: 14,
-    elevation: 14,
+    // 体長リング・設定アイコンより手前に泳ぐ。モーダル類は別レイヤーのため常に前面のまま。
+    zIndex: 450,
+    elevation: 30,
     overflow: 'visible',
   },
   oosan: {
@@ -2157,6 +4045,169 @@ const styles = StyleSheet.create({
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 2,
   },
+  careSpeechBubble: {
+    position: 'absolute',
+    alignSelf: 'center',
+    maxWidth: '82%',
+    paddingHorizontal: 13,
+    paddingVertical: 8,
+    borderRadius: 15,
+    backgroundColor: 'rgba(255, 255, 255, 0.92)',
+    borderWidth: 1,
+    borderColor: 'rgba(42, 112, 139, 0.36)',
+    shadowColor: '#000',
+    shadowOpacity: 0.2,
+    shadowRadius: 4,
+    shadowOffset: { width: 0, height: 2 },
+    elevation: 8,
+  },
+  careSpeechText: {
+    color: '#286178',
+    fontSize: 14,
+    fontWeight: '800',
+    textAlign: 'center',
+  },
+  growthStageUpBackdrop: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 22,
+    backgroundColor: 'rgba(4, 29, 45, 0.7)',
+  },
+  growthStageUpCard: {
+    width: '100%',
+    maxWidth: 360,
+    borderRadius: 24,
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    paddingTop: 23,
+    paddingBottom: 20,
+    backgroundColor: '#eefbff',
+    borderWidth: 2,
+    borderColor: 'rgba(126, 213, 240, 0.95)',
+    shadowColor: '#000',
+    shadowOpacity: 0.35,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 18,
+  },
+  growthLevelUpCard: {
+    width: '100%',
+    maxWidth: 340,
+    borderRadius: 24,
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    paddingTop: 23,
+    paddingBottom: 20,
+    backgroundColor: '#f2fcff',
+    borderWidth: 2,
+    borderColor: 'rgba(126, 213, 240, 0.95)',
+    shadowColor: '#000',
+    shadowOpacity: 0.35,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 18,
+  },
+  growthStageUpEyebrow: { color: '#2788b5', fontSize: 14, fontWeight: '800', letterSpacing: 0.8 },
+  growthStageUpTitle: { marginTop: 5, color: '#1d5971', fontSize: 25, fontWeight: '900', textAlign: 'center' },
+  growthStageUpImage: { width: '100%', height: 150, marginTop: 5 },
+  growthLevelUpImage: { width: '100%', height: 128, marginTop: 7, marginBottom: 5 },
+  growthStageUpName: { color: '#1d769d', fontSize: 20, fontWeight: '900', textAlign: 'center' },
+  growthStageUpBody: { marginTop: 6, color: '#397085', fontSize: 14, textAlign: 'center' },
+  growthStageUpButton: { alignSelf: 'stretch', marginTop: 18, borderRadius: 15, paddingVertical: 13, backgroundColor: '#3baee0' },
+  growthStageUpButtonText: { color: '#fff', fontSize: 16, fontWeight: '900', textAlign: 'center' },
+  adultEvolutionBackdrop: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 22,
+    backgroundColor: 'rgba(4, 29, 45, 0.78)',
+  },
+  adultEvolutionCard: {
+    width: '100%',
+    maxWidth: 380,
+    borderRadius: 24,
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    paddingTop: 24,
+    paddingBottom: 20,
+    backgroundColor: '#eefbff',
+    borderWidth: 2,
+    borderColor: 'rgba(126, 213, 240, 0.95)',
+    shadowColor: '#000',
+    shadowOpacity: 0.35,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 18,
+  },
+  adultEvolutionEyebrow: {
+    color: '#2788b5',
+    fontSize: 14,
+    fontWeight: '800',
+    letterSpacing: 0.8,
+  },
+  adultEvolutionTitle: {
+    marginTop: 5,
+    color: '#1d5971',
+    fontSize: 25,
+    fontWeight: '900',
+    textAlign: 'center',
+  },
+  adultEvolutionImage: {
+    width: '100%',
+    height: 175,
+    marginTop: 8,
+  },
+  adultEvolutionBody: {
+    color: '#397085',
+    fontSize: 14,
+    lineHeight: 21,
+    textAlign: 'center',
+  },
+  adultEvolutionButton: {
+    alignSelf: 'stretch',
+    marginTop: 18,
+    borderRadius: 15,
+    paddingVertical: 13,
+    backgroundColor: '#3baee0',
+  },
+  adultEvolutionButtonText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '900',
+    textAlign: 'center',
+  },
+  affectionLevelUpBackdrop: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 22,
+    backgroundColor: 'rgba(48, 20, 40, 0.67)',
+  },
+  affectionLevelUpCard: {
+    width: '100%',
+    maxWidth: 350,
+    borderRadius: 24,
+    alignItems: 'center',
+    paddingHorizontal: 22,
+    paddingTop: 26,
+    paddingBottom: 20,
+    backgroundColor: '#fff7fa',
+    borderWidth: 2,
+    borderColor: '#ffb9c9',
+    shadowColor: '#000',
+    shadowOpacity: 0.3,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 18,
+  },
+  affectionLevelUpEyebrow: { color: '#d85d7b', fontSize: 14, fontWeight: '900', letterSpacing: 0.8 },
+  affectionLevelUpHearts: { marginTop: 7, color: '#ee6d8c', fontSize: 28, letterSpacing: 3 },
+  affectionLevelUpTitle: { marginTop: 4, color: '#a9435e', fontSize: 23, fontWeight: '900', textAlign: 'center' },
+  affectionLevelUpName: { marginTop: 5, color: '#d85d7b', fontSize: 17, fontWeight: '900', textAlign: 'center' },
+  affectionLevelUpBody: { marginTop: 13, color: '#805866', fontSize: 14, lineHeight: 21, textAlign: 'center' },
+  affectionLevelUpButton: { alignSelf: 'stretch', marginTop: 18, borderRadius: 15, paddingVertical: 13, backgroundColor: '#ee7992' },
+  affectionLevelUpButtonText: { color: '#fff', fontSize: 16, fontWeight: '900', textAlign: 'center' },
   dailyLog: {
     color: 'rgba(255, 255, 255, 0.8)',
     fontSize: 16,
