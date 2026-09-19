@@ -20,6 +20,7 @@ jobs:
     timeout-minutes: 60
     env:
       IOS_BUILD_NUMBER: ${{ inputs.build_number }}
+      EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
@@ -31,14 +32,8 @@ jobs:
       - name: Install JavaScript dependencies
         run: npm ci
 
-      - name: Configure Expo
-        uses: expo/expo-github-action@v8
-        with:
-          eas-version: latest
-          token: ${{ secrets.EXPO_TOKEN }}
-
       - name: Build signed IPA on the GitHub macOS runner
-        run: npx eas-cli@latest build --platform ios --profile production --local --output "$RUNNER_TEMP/oosan-river.ipa" --non-interactive
+        run: npx --yes eas-cli@latest build --platform ios --profile production --local --output "$RUNNER_TEMP/oosan-river.ipa" --non-interactive
 
       - name: Save IPA
         uses: actions/upload-artifact@v4
@@ -48,4 +43,4 @@ jobs:
 
       - name: Upload to App Store Connect
         if: ${{ inputs.submit }}
-        run: npx eas-cli@latest submit --platform ios --path "$RUNNER_TEMP/oosan-river.ipa" --profile production --non-interactive
+        run: npx --yes eas-cli@latest submit --platform ios --path "$RUNNER_TEMP/oosan-river.ipa" --profile production --non-interactive
