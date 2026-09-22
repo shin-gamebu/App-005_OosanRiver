@@ -344,10 +344,34 @@ export type CareActionResult = {
   dailyBonusEarned: boolean;
 };
 
+export const CARE_POINT_UNLOCK_PERCENT = 99.5;
+
+/** 次に通常のお世話で体長ptを得られるまでの目安。小数のゲージ値から計算する。 */
+export function growthPointWaitLabel(gaugePercent: number, secondsPerOnePercent: number): string {
+  const seconds = Math.max(0, gaugePercent - CARE_POINT_UNLOCK_PERCENT) * secondsPerOnePercent;
+  if (seconds <= 1) return '+1pt！';
+  const totalMinutes = Math.ceil(seconds / 60);
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return hours > 0 ? `あと${hours}時間で+1pt` : `あと${minutes}分で+1pt`;
+}
+
+/** ゲージが0%になるまでの目安を、時・分・秒で表示する。 */
+export function careTimeUntilEmptyLabel(gaugePercent: number, secondsPerOnePercent: number): string {
+  if (gaugePercent <= 0) return '空っぽ';
+  const totalSeconds = Math.ceil(Math.min(100, gaugePercent) * secondsPerOnePercent);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) return `空まであと${hours}時間${minutes}分${seconds}秒`;
+  if (minutes > 0) return `空まであと${minutes}分${seconds}秒`;
+  return `空まであと${seconds}秒`;
+}
+
 /** おなか／ヌメリを満タンへ戻すのに必要な、残りお世話回数（最大3回）。 */
 export function careActionsRemainingForGauge(gaugePercent: number): number {
   const clamped = Math.max(0, Math.min(100, gaugePercent));
-  if (clamped >= 99.5) return 0;
+  if (clamped >= CARE_POINT_UNLOCK_PERCENT) return 0;
   // 回復量と同じ33.3%単位で、残りの獲得可能ptを数える。
   // 0%→33.3%→66.7%→100% の各タップと、+3/+2/+1の表示が一致する。
   return Math.max(0, Math.min(3, Math.ceil((100 - clamped) / (100 / 3) - 0.000001)));
@@ -366,7 +390,9 @@ export function careGrowthPointsForGauge(gaugePercent: number, growthLevel: numb
  * ごはん／おみずは毎回33.3%ずつ回復する。3回で満タンになる。
  */
 function replenishCareGauge(gaugePercent: number): number {
-  return Math.min(100, gaugePercent + 100 / 3);
+  const replenished = Math.min(100, gaugePercent + 100 / 3);
+  // 画面が100%と表示する範囲は、内部値も100%へそろえて判定の食い違いを防ぐ。
+  return replenished >= CARE_POINT_UNLOCK_PERCENT ? 100 : replenished;
 }
 
 /**
@@ -505,7 +531,7 @@ export function applyCareAction(state: AppState, action: CareAction, at: Date = 
       fullness: nextFullness,
       feedCountToday: Math.min(3, count + 1),
       feedGrowthPointsToday: Math.min(dailyCap, earnedToday + growthPointsEarned),
-      dailyFeedMissionComplete: next.dailyFeedMissionComplete || (next.fullness < 100 && nextFullness >= 100),
+      dailyFeedMissionComplete: next.dailyFeedMissionComplete || nextFullness >= CARE_POINT_UNLOCK_PERCENT,
     };
   } else if (action === 'water') {
     const count = next.waterCountToday ?? 0;
@@ -520,7 +546,7 @@ export function applyCareAction(state: AppState, action: CareAction, at: Date = 
       viscosity: nextViscosity,
       waterCountToday: Math.min(3, count + 1),
       waterGrowthPointsToday: Math.min(dailyCap, earnedToday + growthPointsEarned),
-      dailyWaterMissionComplete: next.dailyWaterMissionComplete || (next.viscosity < 100 && nextViscosity >= 100),
+      dailyWaterMissionComplete: next.dailyWaterMissionComplete || nextViscosity >= CARE_POINT_UNLOCK_PERCENT,
     };
   } else {
     const normalLimit = dailyPetNormalLimitForAffectionValue(next.affection ?? 0);

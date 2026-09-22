@@ -38,6 +38,8 @@ import {
   resetDailyMissionsForDebug,
   careActionsRemainingForGauge,
   careGrowthPointsForGauge,
+  growthPointWaitLabel,
+  careTimeUntilEmptyLabel,
   affectionLevelForValue,
   affectionHeartColorForLevel,
   affectionEffectHeartCountForLevel,
@@ -63,6 +65,7 @@ import {
   OFFLINE_BACKLOG_PAGE_SIZE,
   OFFLINE_BACKLOG_SPLIT_THRESHOLD,
   getNextMilestoneLine,
+  applyOfflineCatchUp,
 } from './milestones';
 
 describe('ロジック関数のテスト', () => {
@@ -244,7 +247,18 @@ describe('ロジック関数のテスト', () => {
 
       // 毎秒の減衰で内部値が99.9%になっても、画面が100%表示の間は連打で稼げない。
       const nearlyFull = { ...feed2.state, fullness: 99.9 };
-      expect(applyCareAction(nearlyFull, 'feed', at).growthPointsEarned).toBe(0);
+      const repairedNearlyFull = applyCareAction(nearlyFull, 'feed', at);
+      expect(repairedNearlyFull.growthPointsEarned).toBe(0);
+      expect(repairedNearlyFull.state.fullness).toBe(100);
+      expect(repairedNearlyFull.state.dailyFeedMissionComplete).toBe(true);
+
+      // 100%表示になる境界でも、内部値を100へそろえてお世話ミッションを達成する。
+      const boundaryFeed = applyCareAction({ ...s, fullness: 66.2, dailyFeedMissionComplete: false }, 'feed', at);
+      expect(boundaryFeed.state.fullness).toBe(100);
+      expect(boundaryFeed.state.dailyFeedMissionComplete).toBe(true);
+      const boundaryWater = applyCareAction({ ...s, viscosity: 66.2, dailyWaterMissionComplete: false }, 'water', at);
+      expect(boundaryWater.state.viscosity).toBe(100);
+      expect(boundaryWater.state.dailyWaterMissionComplete).toBe(true);
 
       const lowFullness = applyCareAction({ ...s, fullness: 33 }, 'feed', at);
       expect(lowFullness.growthPointsEarned).toBe(1);
@@ -970,6 +984,48 @@ describe('ロジック関数のテスト', () => {
       expect(backgroundGaugeDecayMultiplier(s, t3)).toBe(GAUGE_DECAY_MULT_BACKGROUND_STABLE);
       expect(EARLY_CARE_BG_DAYS).toBe(0);
       expect(EARLY_CARE_BG_EXTRA_MULT).toBe(1);
+    });
+  });
+
+  describe('おなか・ヌメリの経過時間', () => {
+    const rate = 1 / 432;
+
+    test('タイマーが遅れても実際の経過時間ぶん減り、同じ時刻では二重に減らない', () => {
+      const start = Date.now();
+      const state = { ...createInitialState(), fullness: 100, viscosity: 100, lastGrowthTickMs: start };
+      const afterFourMinutes = applyOfflineCatchUp(state, start + 4 * 60_000, rate, rate);
+      expect(afterFourMinutes.fullness).toBeCloseTo(100 - 240 / 432, 6);
+      expect(afterFourMinutes.viscosity).toBeCloseTo(100 - 240 / 432, 6);
+      expect(careGrowthPointsForGauge(afterFourMinutes.fullness)).toBe(1);
+      expect(applyOfflineCatchUp(afterFourMinutes, start + 4 * 60_000, rate, rate).fullness)
+        .toBeCloseTo(afterFourMinutes.fullness, 6);
+    });
+
+    test('毎秒更新と中断後の追いつきで、同じ経過時間なら同じ残量になる', () => {
+      const start = Date.now();
+      const state = { ...createInitialState(), fullness: 100, viscosity: 100, lastGrowthTickMs: start };
+      let stepped = state;
+      for (let second = 1; second <= 240; second++) {
+        stepped = applyOfflineCatchUp(stepped, start + second * 1000, rate, rate);
+      }
+      const resumed = applyOfflineCatchUp(state, start + 240_000, rate, rate);
+      expect(stepped.fullness).toBeCloseTo(resumed.fullness, 6);
+      expect(stepped.viscosity).toBeCloseTo(resumed.viscosity, 6);
+    });
+
+    test('残り時間の表示は100%から1分ずつ減る', () => {
+      expect(growthPointWaitLabel(100, 432)).toBe('あと4分で+1pt');
+      expect(growthPointWaitLabel(99.9, 432)).toBe('あと3分で+1pt');
+      expect(growthPointWaitLabel(99.7, 432)).toBe('あと2分で+1pt');
+      expect(growthPointWaitLabel(99.49, 432)).toBe('+1pt！');
+    });
+
+    test('空になるまでの目安は時間・分・秒で表示する', () => {
+      expect(careTimeUntilEmptyLabel(100, 432)).toBe('空まであと12時間0分0秒');
+      expect(careTimeUntilEmptyLabel(50, 432)).toBe('空まであと6時間0分0秒');
+      expect(careTimeUntilEmptyLabel(0.1, 432)).toBe('空まであと44秒');
+      expect(careTimeUntilEmptyLabel(1, 432)).toBe('空まであと7分12秒');
+      expect(careTimeUntilEmptyLabel(0, 432)).toBe('空っぽ');
     });
   });
 

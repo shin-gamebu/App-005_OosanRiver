@@ -338,8 +338,8 @@ const MAX_OFFLINE_STEP_MS = 14 * MS_DAY;
 const SIM_STEP_MS = 60_000;
 
 /**
- * オフライン中の成長・満腹・ヌメリ減少をまとめて反映（1分刻みシミュレーション）。
- * ゲージ減少は各ステップ時刻で backgroundGaugeDecayMultiplier（12h/24h 目安・初日ブースト）を掛ける。
+ * 前回の更新からの実経過時間で、おなか・ヌメリの減少を反映する。
+ * 長い中断は1分刻みで計算し、毎秒の更新にも同じ関数を使う。
  */
 export function applyOfflineCatchUp(
   state: AppState,
@@ -351,11 +351,8 @@ export function applyOfflineCatchUp(
     return { ...state, lastGrowthTickMs: nowMs };
   }
   const from = Math.min(state.lastGrowthTickMs, nowMs);
-  let delta = nowMs - from;
-  if (delta < 2000) {
-    return { ...state, lastGrowthTickMs: nowMs };
-  }
-  delta = Math.min(delta, MAX_OFFLINE_STEP_MS);
+  const delta = Math.min(nowMs - from, MAX_OFFLINE_STEP_MS);
+  if (delta <= 0) return { ...state, lastGrowthTickMs: nowMs };
 
   let s = { ...state };
   let t = 0;
@@ -369,7 +366,7 @@ export function applyOfflineCatchUp(
   }
 
   const remMs = delta - t;
-  if (remMs >= 1000) {
+  if (remMs > 0) {
     const sec = remMs / 1000;
     const tailMs = from + delta;
     const bgm = backgroundGaugeDecayMultiplier(s, tailMs);
