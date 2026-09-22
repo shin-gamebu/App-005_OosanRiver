@@ -9,6 +9,7 @@ const iosBuildNumber = process.env.IOS_BUILD_NUMBER;
 
 module.exports = {
   ...expo,
+  version: '1.0.1',
   name: isDevelopmentVariant ? 'オオサンショウウオ育成（開発）' : expo.name,
   ios: {
     ...expo.ios,

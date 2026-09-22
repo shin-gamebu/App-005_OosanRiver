@@ -13,6 +13,7 @@ import {
   Easing,
   AppState as RNAppState,
   Modal,
+  Keyboard,
   KeyboardAvoidingView,
   Pressable,
   type GestureResponderEvent,
@@ -44,7 +45,6 @@ import {
   getGrowthPhaseLabel,
   fullnessBarColor,
   viscosityBarColor,
-  backgroundGaugeDecayMultiplier,
   DEFAULT_NIGHT_CARE_MULTIPLIER,
   DAYS_UNTIL_INACTIVITY_REMINDER,
   applyCareAction,
@@ -52,6 +52,9 @@ import {
   claimDailyPetMissionReward,
   resetDailyMissionsForDebug,
   careGrowthPointsForGauge,
+  CARE_POINT_UNLOCK_PERCENT,
+  growthPointWaitLabel,
+  careTimeUntilEmptyLabel,
   dailyCareGrowthPointCapForLevel,
   affectionLevelForValue,
   affectionHeartColorForLevel,
@@ -112,6 +115,30 @@ const DEBUG_FORCE_MAX_OOSAN_LENGTH = false;
  */
 const DEBUG_RESET_GROWTH_PROGRESS_ONCE = false;
 
+const FEED_REACTION_MESSAGES = [
+  'もぐもぐ、おいしい！',
+  'もっと食べたいな',
+  'ごはん、ありがとう！',
+  'おなかが元気になったよ',
+  'ぱくっ！',
+  '今日のごはんもおいしいね',
+] as const;
+
+const WATER_REACTION_MESSAGES = [
+  'ひんやり、きもちいい〜',
+  'ぬめぬめ復活！',
+  'おみず、ありがとう！',
+  'からだがうるおったよ',
+  'つめたくて気持ちいい！',
+  'これで元気に泳げそう',
+] as const;
+
+/** 同じ反応が続かないよう、直前以外から選ぶ。 */
+const pickDifferentMessage = (messages: readonly string[], previous: string | null): string => {
+  const candidates = messages.filter((message) => message !== previous);
+  return candidates[Math.floor(Math.random() * candidates.length)] ?? messages[0];
+};
+
 const growthRewardLabel = (reward: GrowthMissionRewardKind, uses: number = 3): string => {
   // 通常のお世話と区別できるよう、「ごほうび」は必ず残す。
   if (reward === 'feed') return `ごほうびごはん×${uses}`;
@@ -155,7 +182,7 @@ const DEBUG_FORCE_DAY_UI = __DEV__ && false;
 const STORAGE_KEY = 'oosanRiverState';
 
 /**
- * 満腹（おなか）が平均して 1% 減るまでの目安秒数（毎秒の減りにジッターを掛ける）
+ * 満腹（おなか）が1%減るまでの目安秒数。
  */
 const FULLNESS_SECONDS_PER_ONE_PERCENT = 432;
 
@@ -164,39 +191,6 @@ const VISCOSITY_SECONDS_PER_ONE_PERCENT = 432;
 
 const FULLNESS_DECAY_PER_SECOND = 1 / FULLNESS_SECONDS_PER_ONE_PERCENT;
 const VISCOSITY_DECAY_PER_SECOND = 1 / VISCOSITY_SECONDS_PER_ONE_PERCENT;
-/**
- * 満タン直後の連打だけを防ぐための、ごく短い待機ライン。
- * 99%ならすでに+1ptを得られる仕様なので、以前の「約4時間」基準は使わない。
- */
-const CARE_POINT_UNLOCK_PERCENT = 99.5;
-
-const growthPointWaitLabel = (gaugePercent: number, secondsPerOnePercent: number): string => {
-  // ゲージの表示値と「受取OK」判定が食い違わないよう、区切りも表示と同じ整数にそろえる。
-  const displayedGauge = Math.round(gaugePercent);
-  const seconds = Math.max(0, displayedGauge - CARE_POINT_UNLOCK_PERCENT) * secondsPerOnePercent;
-  if (seconds <= 1) return '+1pt！';
-  const totalMinutes = Math.ceil(seconds / 60);
-  const hours = Math.floor(totalMinutes / 60);
-  const minutes = totalMinutes % 60;
-  // 操作ボタン下の小さな枠でも、末尾の「+1pt」まで必ず読める長さにする。
-  return hours > 0 ? `あと${hours}時間で+1pt` : `あと${minutes}分で+1pt`;
-};
-
-/**
- * フォアグラウンド中のおなか・ヌメリ減少に掛ける倍率（基準は各 SECONDS_PER_ONE_PERCENT）。
- * 開いているときも閉じているときも、100→0 は平均約12時間。
- * 連打で100%からわずかに減ることを防ぎ、ゆっくり育てられる速度にする。
- */
-const GAUGE_DECAY_MULT_FOREGROUND = 1;
-
-/** 毎秒の減少量に掛ける乱数（平均 1.0、やや狭い幅） */
-const DECAY_JITTER_MIN = 0.9;
-const DECAY_JITTER_MAX = 1.1;
-
-function sampleDecayJitter(): number {
-  return DECAY_JITTER_MIN + Math.random() * (DECAY_JITTER_MAX - DECAY_JITTER_MIN);
-}
-
 // AsyncStorage から状態を読み込む
 export const loadState = async (): Promise<AppState> => {
   try {
@@ -842,18 +836,35 @@ const AppMain: React.FC = () => {
   const affectionGaugeCelebrationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [careSpeech, setCareSpeech] = useState<string | null>(null);
   const careSpeechTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const careSpeechFollowUpTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastCareReactionRef = useRef<{ feed: string | null; water: string | null }>({ feed: null, water: null });
   const removeTapRipple = useCallback((id: number) => {
     setTapRipples((list) => list.filter((t) => t.id !== id));
   }, []);
 
   const showCareSpeech = useCallback((message: string) => {
     if (careSpeechTimerRef.current) clearTimeout(careSpeechTimerRef.current);
+    if (careSpeechFollowUpTimerRef.current) {
+      clearTimeout(careSpeechFollowUpTimerRef.current);
+      careSpeechFollowUpTimerRef.current = null;
+    }
     setCareSpeech(message);
     careSpeechTimerRef.current = setTimeout(() => {
       setCareSpeech(null);
       careSpeechTimerRef.current = null;
     }, 2600);
   }, []);
+
+  const showCareReaction = useCallback((kind: 'feed' | 'water', message: string, followUp?: string) => {
+    lastCareReactionRef.current[kind] = message;
+    showCareSpeech(message);
+    if (followUp) {
+      careSpeechFollowUpTimerRef.current = setTimeout(() => {
+        careSpeechFollowUpTimerRef.current = null;
+        showCareSpeech(followUp);
+      }, 2200);
+    }
+  }, [showCareSpeech]);
 
   const showCareGaugeWarning = useCallback((kind: 'feed' | 'water', isEmpty: boolean) => {
     setCareWarningOpen({ kind, isEmpty });
@@ -919,6 +930,7 @@ const AppMain: React.FC = () => {
 
   useEffect(() => () => {
     if (careSpeechTimerRef.current) clearTimeout(careSpeechTimerRef.current);
+    if (careSpeechFollowUpTimerRef.current) clearTimeout(careSpeechFollowUpTimerRef.current);
     if (affectionGaugeCelebrationTimerRef.current) clearTimeout(affectionGaugeCelebrationTimerRef.current);
   }, []);
 
@@ -969,6 +981,23 @@ const AppMain: React.FC = () => {
   }, []);
 
   const applyDebugBodyLengthCm = useCallback((cm: number) => {
+    // デバッグ操作の前に、以前のモーダルやキーボードがタップを遮らないよう必ず解除する。
+    // ここは開発用メニューからしか呼ばれないため、通常プレイ中のポップアップには影響しない。
+    Keyboard.dismiss();
+    setRestartConfirmOpen(false);
+    setNewOosanGuideOpen(false);
+    setNameEditorOpen(false);
+    setCareWarningOpen(null);
+    setCareTimingInfoOpen(false);
+    setMissionOpen(false);
+    setDailyMissionRewardPopup(null);
+    setPendingMissionRewardPopup(null);
+    setGrowthGuideOpen(false);
+    setLegalInfoOpen(false);
+    setAdultEvolutionOpen(false);
+    setGrowthStageNotice(null);
+    setGrowthLengthUp(null);
+    setAffectionLevelUp(null);
     setCelebrationQueue([]);
     setCelebrationItem(null);
     setSparkleActive(false);
@@ -984,7 +1013,9 @@ const AppMain: React.FC = () => {
       void saveState(n);
       return n;
     });
-    setNewOosanGuideOpen(true);
+    // 体長リセット時だけ、初回と同じお世話案内を表示する。
+    // 任意の体長へ変更するデバッグ操作でモーダルを開くと、背後の操作を遮ってしまう。
+    setNewOosanGuideOpen(cm <= 0);
   }, [bannerAnim]);
 
   const applyDebugGauges = useCallback(
@@ -1168,18 +1199,27 @@ const AppMain: React.FC = () => {
     // 満タンでも、かわいがった反応としてごはんの演出は見せる。
     spawnBurst('feed');
     // 満タン時だけは演出のみ。90〜99%なら、ptなしで満タンまで回復できる。
-    if (state.fullness >= 99.5) {
+    if (state.fullness >= CARE_POINT_UNLOCK_PERCENT && state.dailyFeedMissionComplete) {
       showCareSpeech(Math.random() < 0.5 ? 'いまはおなかいっぱい〜' : 'もう少しおなかがすいたら食べようね');
       return;
     }
     const preview = applyCareAction(state, 'feed', getNow());
-    if (
+    const careMissionJustCompleted =
       preview.state.dailyFeedMissionComplete &&
       preview.state.dailyWaterMissionComplete &&
-      !(state.dailyFeedMissionComplete && state.dailyWaterMissionComplete)
-    ) {
-      showCareSpeech('お世話ミッション達成！ ミッションで報酬を受け取ってね');
-    }
+      !(state.dailyFeedMissionComplete && state.dailyWaterMissionComplete);
+    const feedReachedFull = state.fullness < CARE_POINT_UNLOCK_PERCENT && preview.state.fullness >= CARE_POINT_UNLOCK_PERCENT;
+    const feedReaction =
+      feedReachedFull && preview.state.viscosity >= CARE_POINT_UNLOCK_PERCENT
+        ? 'おなかもぬめりも絶好調！'
+        : feedReachedFull
+          ? 'おなかいっぱい！ ごちそうさま'
+          : pickDifferentMessage(FEED_REACTION_MESSAGES, lastCareReactionRef.current.feed);
+    showCareReaction(
+      'feed',
+      feedReaction,
+      careMissionJustCompleted ? 'お世話ミッション達成！ ミッションで報酬を受け取ってね' : undefined
+    );
     setState((s) => {
       if (!s || s.condition === 'dead') return s;
       const care = applyCareAction(s, 'feed', getNow());
@@ -1191,7 +1231,7 @@ const AppMain: React.FC = () => {
       void saveState(care.state);
       return care.state;
     });
-  }, [state, showCareSpeech, spawnBurst, getNow]);
+  }, [state, showCareReaction, showCareSpeech, spawnBurst, getNow]);
 
   const onWater = useCallback(() => {
     if (!state || state.condition === 'dead') return;
@@ -1212,18 +1252,27 @@ const AppMain: React.FC = () => {
     // 満タンでも、かわいがった反応としておみずの演出は見せる。
     spawnBurst('water');
     // 満タン時だけは演出のみ。90〜99%なら、ptなしで満タンまで回復できる。
-    if (state.viscosity >= 99.5) {
+    if (state.viscosity >= CARE_POINT_UNLOCK_PERCENT && state.dailyWaterMissionComplete) {
       showCareSpeech(Math.random() < 0.5 ? 'いまはぬめぬめ、ばっちり！' : 'もう少し乾いたらおみずをもらおうね');
       return;
     }
     const preview = applyCareAction(state, 'water', getNow());
-    if (
+    const careMissionJustCompleted =
       preview.state.dailyFeedMissionComplete &&
       preview.state.dailyWaterMissionComplete &&
-      !(state.dailyFeedMissionComplete && state.dailyWaterMissionComplete)
-    ) {
-      showCareSpeech('お世話ミッション達成！ ミッションで報酬を受け取ってね');
-    }
+      !(state.dailyFeedMissionComplete && state.dailyWaterMissionComplete);
+    const waterReachedFull = state.viscosity < CARE_POINT_UNLOCK_PERCENT && preview.state.viscosity >= CARE_POINT_UNLOCK_PERCENT;
+    const waterReaction =
+      waterReachedFull && preview.state.fullness >= CARE_POINT_UNLOCK_PERCENT
+        ? 'おなかもぬめりも絶好調！'
+        : waterReachedFull
+          ? 'ぬめぬめ、ばっちり！'
+          : pickDifferentMessage(WATER_REACTION_MESSAGES, lastCareReactionRef.current.water);
+    showCareReaction(
+      'water',
+      waterReaction,
+      careMissionJustCompleted ? 'お世話ミッション達成！ ミッションで報酬を受け取ってね' : undefined
+    );
     setState((s) => {
       if (!s || s.condition === 'dead') return s;
       const care = applyCareAction(s, 'water', getNow());
@@ -1235,7 +1284,7 @@ const AppMain: React.FC = () => {
       void saveState(care.state);
       return care.state;
     });
-  }, [state, showCareSpeech, spawnBurst, getNow]);
+  }, [state, showCareReaction, showCareSpeech, spawnBurst, getNow]);
 
   // 画像とGIFをプリロード
   useEffect(() => {
@@ -1411,6 +1460,19 @@ const AppMain: React.FC = () => {
       const s = stateRef.current;
       if (next === 'active') {
         void clearPredictiveGaugeAlerts();
+        if (prev !== 'active') {
+          setState((current) => {
+            if (!current || current.condition === 'dead') return current;
+            const caughtUp = applyOfflineCatchUp(
+              current,
+              Date.now(),
+              FULLNESS_DECAY_PER_SECOND,
+              VISCOSITY_DECAY_PER_SECOND
+            );
+            void saveState(caughtUp);
+            return caughtUp;
+          });
+        }
       }
       if (!s || s.condition === 'dead') return;
       if (prev === 'active' && next !== 'active') {
@@ -1461,21 +1523,12 @@ const AppMain: React.FC = () => {
     const id = setInterval(() => {
       setState((prev) => {
         if (!prev || prev.condition === 'dead') return prev;
-        const fj = sampleDecayJitter();
-        const vj = sampleDecayJitter();
-        const tickNow = Date.now() + timeOffsetRef.current;
-        const gaugeDecayMult =
-          RNAppState.currentState === 'active'
-            ? GAUGE_DECAY_MULT_FOREGROUND
-            : backgroundGaugeDecayMultiplier(prev, tickNow);
-        const fullnessLoss = FULLNESS_DECAY_PER_SECOND * fj * gaugeDecayMult;
-        const viscosityLoss = VISCOSITY_DECAY_PER_SECOND * vj * gaugeDecayMult;
-        const next: AppState = {
-          ...prev,
-          fullness: Math.max(0, prev.fullness - fullnessLoss),
-          viscosity: Math.max(0, prev.viscosity - viscosityLoss),
-          lastGrowthTickMs: Date.now(),
-        };
+        const next = applyOfflineCatchUp(
+          prev,
+          Date.now(),
+          FULLNESS_DECAY_PER_SECOND,
+          VISCOSITY_DECAY_PER_SECOND
+        );
         void saveState(next);
         return next;
       });
@@ -1926,12 +1979,17 @@ const AppMain: React.FC = () => {
   const dailyCarePointCap = dailyCareGrowthPointCapForLevel(growthLevel);
   const feedDailyPointCapReached = feedGrowthPointsToday >= dailyCarePointCap;
   const waterDailyPointCapReached = waterGrowthPointsToday >= dailyCarePointCap;
+  const dailyCarePointsEarned = Math.min(feedGrowthPointsToday, dailyCarePointCap)
+    + Math.min(waterGrowthPointsToday, dailyCarePointCap);
+  const totalDailyCarePointCap = dailyCarePointCap * 2;
   const feedPointReward = careGrowthPointsForGauge(state.fullness, growthLevel);
   const waterPointReward = careGrowthPointsForGauge(state.viscosity, growthLevel);
   const canEarnFeedPoint = feedPointReward > 0 && !feedDailyPointCapReached && growthPointsNeeded > 0;
   const canEarnWaterPoint = waterPointReward > 0 && !waterDailyPointCapReached && growthPointsNeeded > 0;
   const feedPointWait = growthPointWaitLabel(state.fullness, FULLNESS_SECONDS_PER_ONE_PERCENT);
   const waterPointWait = growthPointWaitLabel(state.viscosity, VISCOSITY_SECONDS_PER_ONE_PERCENT);
+  const fullnessEmptyTime = careTimeUntilEmptyLabel(state.fullness, FULLNESS_SECONDS_PER_ONE_PERCENT);
+  const viscosityEmptyTime = careTimeUntilEmptyLabel(state.viscosity, VISCOSITY_SECONDS_PER_ONE_PERCENT);
   const dailyFeedMissionComplete = state.dailyFeedMissionComplete === true;
   const dailyWaterMissionComplete = state.dailyWaterMissionComplete === true;
   const dailyPetMissionComplete = state.dailyPetMissionComplete === true;
@@ -1989,6 +2047,15 @@ const AppMain: React.FC = () => {
   const minOosanPx = Math.min(64, Math.max(48, shortSide * 0.14));
   const sizeMax = Math.max(minOosanPx, oosanMaxWidthPx);
   const size = minOosanPx + growthT * (sizeMax - minOosanPx);
+  const careSpeechBubbleWidth = Math.min(210, screenWidth - 24);
+  const careSpeechFaceX = isMovingRight ? screenWidth / 2 + size * 0.5 : screenWidth / 2 - size * 0.5;
+  const careSpeechLeft = Math.max(
+    12,
+    Math.min(
+      screenWidth - careSpeechBubbleWidth - 12,
+      careSpeechFaceX - (isMovingRight ? careSpeechBubbleWidth - 24 : 24)
+    )
+  );
   oosanLayoutSizeRef.current = size;
   oosanLengthCmRef.current = lengthCm;
   const opacity = state.condition === 'weak' ? 0.5 : 1.0;
@@ -2174,8 +2241,24 @@ const AppMain: React.FC = () => {
               </View>
             )}
             {careSpeech && (
-              <View style={[styles.careSpeechBubble, { bottom: isAdultOosan ? size * 0.42 : size * 0.62 }]} pointerEvents="none">
+              <View
+                style={[
+                  styles.careSpeechBubble,
+                  {
+                    bottom: isAdultOosan ? size * 0.42 : size * 0.62,
+                    left: careSpeechLeft,
+                    width: careSpeechBubbleWidth,
+                  },
+                ]}
+                pointerEvents="none"
+              >
                 <Text style={styles.careSpeechText}>{careSpeech}</Text>
+                <View
+                  style={[
+                    styles.careSpeechTail,
+                    isMovingRight ? styles.careSpeechTailRight : styles.careSpeechTailLeft,
+                  ]}
+                />
               </View>
             )}
             {isPetting && (
@@ -2251,7 +2334,7 @@ const AppMain: React.FC = () => {
                   <TouchableOpacity
                     onPress={() => setCareTimingInfoOpen(true)}
                     hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-                    accessibilityLabel="おなかとヌメリの減少時間を確認する"
+                    accessibilityLabel="おなかとヌメリのお世話ポイントを確認する"
                   >
                     <Ionicons name="information-circle-outline" size={15} color="#ffffff" style={styles.gaugeInfoIcon} />
                   </TouchableOpacity>
@@ -2290,6 +2373,7 @@ const AppMain: React.FC = () => {
                     <Text style={styles.gaugeRewardLabel}>+1pt</Text>
                     <Text style={styles.gaugeRewardLabel}>+1pt</Text>
                   </View>
+                  <Text style={styles.gaugeEmptyTime}>{fullnessEmptyTime}</Text>
                 </View>
                 <Text style={styles.gaugePct}>{Math.round(state.fullness)}%</Text>
               </View>
@@ -2299,7 +2383,7 @@ const AppMain: React.FC = () => {
                   <TouchableOpacity
                     onPress={() => setCareTimingInfoOpen(true)}
                     hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-                    accessibilityLabel="おなかとヌメリの減少時間を確認する"
+                    accessibilityLabel="おなかとヌメリのお世話ポイントを確認する"
                   >
                     <Ionicons name="information-circle-outline" size={15} color="#ffffff" style={styles.gaugeInfoIcon} />
                   </TouchableOpacity>
@@ -2339,6 +2423,7 @@ const AppMain: React.FC = () => {
                     <Text style={styles.gaugeRewardLabel}>+1pt</Text>
                     <Text style={styles.gaugeRewardLabel}>+1pt</Text>
                   </View>
+                  <Text style={styles.gaugeEmptyTime}>{viscosityEmptyTime}</Text>
                 </View>
                 <Text style={styles.gaugePct}>{Math.round(state.viscosity)}%</Text>
               </View>
@@ -2391,7 +2476,7 @@ const AppMain: React.FC = () => {
                 </TouchableOpacity>
                 <View style={styles.actionPointSlot} pointerEvents="none">
                   <Text numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.72} style={[styles.actionPointHint, bonusFeedCare > 0 && styles.actionPointHintBonus, bonusFeedCare <= 0 && !canEarnFeedPoint && styles.actionPointHintNoPoint]}>
-                    {bonusFeedCare > 0 ? `ごほうび あと${bonusFeedCare}回` : feedDailyPointCapReached ? `今日${dailyCarePointCap}ptまで` : canEarnFeedPoint ? '+1pt' : feedPointWait}
+                    {bonusFeedCare > 0 ? `ごほうび あと${bonusFeedCare}回` : feedDailyPointCapReached ? '今日は上限' : canEarnFeedPoint ? '+1pt' : feedPointWait}
                   </Text>
                 </View>
               </View>
@@ -2405,7 +2490,7 @@ const AppMain: React.FC = () => {
                 </TouchableOpacity>
                 <View style={styles.actionPointSlot} pointerEvents="none">
                   <Text numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.72} style={[styles.actionPointHint, bonusWaterCare > 0 && styles.actionPointHintBonus, bonusWaterCare <= 0 && !canEarnWaterPoint && styles.actionPointHintNoPoint]}>
-                    {bonusWaterCare > 0 ? `ごほうび あと${bonusWaterCare}回` : waterDailyPointCapReached ? `今日${dailyCarePointCap}ptまで` : canEarnWaterPoint ? '+1pt' : waterPointWait}
+                    {bonusWaterCare > 0 ? `ごほうび あと${bonusWaterCare}回` : waterDailyPointCapReached ? '今日は上限' : canEarnWaterPoint ? '+1pt' : waterPointWait}
                   </Text>
                 </View>
               </View>
@@ -2623,10 +2708,37 @@ const AppMain: React.FC = () => {
             <Text style={styles.missionRewardPopupEyebrow}>CARE TIMING</Text>
             <Text style={styles.missionRewardPopupTitle}>お世話の目安</Text>
             <View style={styles.careTimingCopy}>
-              <Text style={styles.careTimingBody}>おなかとヌメリは、</Text>
-              <Text style={styles.careTimingBody}>満タンから約12時間で空になります。</Text>
-              <Text style={[styles.careTimingBody, styles.careTimingBodySecond]}>ときどき様子を見て、</Text>
-              <Text style={styles.careTimingBody}>ごはんとおみずをあげよう。</Text>
+              <Text style={styles.careTimingBody}>おなかとヌメリは時間とともに少しずつ減ります。</Text>
+              <Text style={[styles.careTimingBody, styles.careTimingBodySecond]}>
+                ゲージの「空まであと」を目安に、ごはんとおみずをあげよう。
+              </Text>
+            </View>
+            <View style={styles.carePointSummaryCard}>
+              <Text style={styles.carePointSummaryTitle}>今日のお世話ポイント</Text>
+              <View style={styles.carePointSummaryRow}>
+                <Text style={styles.carePointSummaryLabel}>ごはん</Text>
+                <Text style={styles.carePointSummaryValue}>
+                  {Math.min(feedGrowthPointsToday, dailyCarePointCap)} / {dailyCarePointCap}pt
+                  {feedDailyPointCapReached ? '　今日は上限' : ''}
+                </Text>
+              </View>
+              <View style={styles.carePointSummaryRow}>
+                <Text style={styles.carePointSummaryLabel}>おみず</Text>
+                <Text style={styles.carePointSummaryValue}>
+                  {Math.min(waterGrowthPointsToday, dailyCarePointCap)} / {dailyCarePointCap}pt
+                  {waterDailyPointCapReached ? '　今日は上限' : ''}
+                </Text>
+              </View>
+              <View style={[styles.carePointSummaryRow, styles.carePointSummaryTotalRow]}>
+                <Text style={styles.carePointSummaryTotalLabel}>合計</Text>
+                <Text style={styles.carePointSummaryTotalValue}>
+                  {dailyCarePointsEarned} / {totalDailyCarePointCap}pt
+                </Text>
+              </View>
+              <Text style={styles.carePointSummaryNote}>
+                現在の体長 {lengthCmText}cmでは、ごはん・おみずから1日最大{totalDailyCarePointCap}pt獲得できます。
+              </Text>
+              <Text style={styles.carePointSummarySubnote}>ミッションとごほうびのptは、この上限とは別に受け取れます。</Text>
             </View>
             <Pressable style={styles.careWarningPopupButton} onPress={() => setCareTimingInfoOpen(false)}>
               <Text style={styles.missionRewardPopupButtonText}>わかった</Text>
@@ -3012,8 +3124,8 @@ const styles = StyleSheet.create({
   missionFloatingButton: {
     position: 'absolute',
     right: 16,
-    // セリフ帯とは離しつつ、上へ行きすぎない中間の高さに置く。
-    bottom: Platform.select({ ios: 406, android: 374, default: 366 }),
+    // ゲージの残り時間表示で高くなったセリフ・情報帯と重ならない位置に置く。
+    bottom: Platform.select({ ios: 434, android: 402, default: 394 }),
     width: 76,
     height: 82,
     alignItems: 'center',
@@ -3094,6 +3206,26 @@ const styles = StyleSheet.create({
   careTimingCopy: { marginTop: 12, alignItems: 'center' },
   careTimingBody: { color: '#6e6653', fontSize: 13, lineHeight: 20, textAlign: 'center' },
   careTimingBodySecond: { marginTop: 10 },
+  carePointSummaryCard: {
+    alignSelf: 'stretch',
+    marginTop: 16,
+    paddingHorizontal: 14,
+    paddingTop: 13,
+    paddingBottom: 12,
+    borderRadius: 16,
+    backgroundColor: '#eef9fd',
+    borderWidth: 1,
+    borderColor: '#b9dfef',
+  },
+  carePointSummaryTitle: { marginBottom: 8, color: '#287695', fontSize: 15, fontWeight: '900', textAlign: 'center' },
+  carePointSummaryRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', minHeight: 26 },
+  carePointSummaryLabel: { color: '#52737d', fontSize: 13, fontWeight: '800' },
+  carePointSummaryValue: { color: '#287695', fontSize: 13, fontWeight: '900' },
+  carePointSummaryTotalRow: { marginTop: 5, paddingTop: 8, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: '#b9dce8' },
+  carePointSummaryTotalLabel: { color: '#245e74', fontSize: 14, fontWeight: '900' },
+  carePointSummaryTotalValue: { color: '#1884af', fontSize: 16, fontWeight: '900' },
+  carePointSummaryNote: { marginTop: 9, color: '#4d7481', fontSize: 11, lineHeight: 17, textAlign: 'center', fontWeight: '700' },
+  carePointSummarySubnote: { marginTop: 4, color: '#78949c', fontSize: 10, lineHeight: 15, textAlign: 'center' },
   careWarningPopupButton: { alignSelf: 'stretch', marginTop: 18, borderRadius: 14, paddingVertical: 13, backgroundColor: '#d59a32' },
   // 見た目より少し広く、オオサンショウウオ本体をつかみやすくする。
   oosanTouchArea: { padding: 12, margin: -12 },
@@ -3846,7 +3978,7 @@ const styles = StyleSheet.create({
   },
   gaugeTrack: {
     flex: 1,
-    height: 25,
+    height: 39,
     marginHorizontal: 8,
   },
   gaugeBarBackground: { height: 10, borderRadius: 6, backgroundColor: 'rgba(0, 0, 0, 0.22)', overflow: 'hidden' },
@@ -3862,6 +3994,7 @@ const styles = StyleSheet.create({
   gaugeDividerSecond: { left: '66.666%' },
   gaugeRewardScale: { flexDirection: 'row', marginTop: 2 },
   gaugeRewardLabel: { flex: 1, color: 'rgba(222, 244, 240, 0.78)', fontSize: 9, fontWeight: '800', textAlign: 'center', fontVariant: ['tabular-nums'] },
+  gaugeEmptyTime: { marginTop: 2, color: '#d2f5ec', fontSize: 10, fontWeight: '600', textAlign: 'center', fontVariant: ['tabular-nums'] },
   gaugePct: {
     width: 38,
     paddingTop: 1,
@@ -4047,8 +4180,6 @@ const styles = StyleSheet.create({
   },
   careSpeechBubble: {
     position: 'absolute',
-    alignSelf: 'center',
-    maxWidth: '82%',
     paddingHorizontal: 13,
     paddingVertical: 8,
     borderRadius: 15,
@@ -4061,6 +4192,20 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 2 },
     elevation: 8,
   },
+  careSpeechTail: {
+    position: 'absolute',
+    bottom: -9,
+    width: 0,
+    height: 0,
+    borderLeftWidth: 8,
+    borderRightWidth: 8,
+    borderTopWidth: 10,
+    borderLeftColor: 'transparent',
+    borderRightColor: 'transparent',
+    borderTopColor: 'rgba(255, 255, 255, 0.92)',
+  },
+  careSpeechTailLeft: { left: 18 },
+  careSpeechTailRight: { right: 18 },
   careSpeechText: {
     color: '#286178',
     fontSize: 14,
